@@ -1,0 +1,15 @@
+node_modules/
+
+# секреты и деплой-конфигурация — только на сервере
+.env
+
+# рантайм-данные — только на сервере, никогда не в репозитории
+poker.db
+poker.db-wal
+poker.db-shm
+active_games.json
+pending_approvals.json
+poker-backup-*.tar.gz
+.backup-snapshot.db
+
+*.log
