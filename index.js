@@ -998,6 +998,12 @@ function totalRebuysSoFar(state) {
   return Object.values(state.rebuys).reduce((s, r) => s + r, 0);
 }
 
+// абсолютный теоретический потолок докупок за игру: 8 игроков (максимум) × 2 докупки каждому.
+// "Резерв" в интерфейсе отсчитывается от этого потолка вниз на фактическое число докупок —
+// а не только от физической вместимости набора — иначе на объёмных наборах фишек (где вместимость
+// намного больше 16) число выглядело бы "залипшим" и не менялось бы после реальных докупок
+const REBUY_BUDGET_CAP = 16;
+
 // физический остаток набора прямо сейчас: стартовые стеки плюс все фактически случившиеся
 // докупки вычтены (тем же способом, каким они реально собирались — из факт. остатка, а не как
 // точные копии стартового стека). null — докупка была невозможна физически, хотя фактически
@@ -1031,7 +1037,9 @@ function maxRebuyStacksNow(state) {
   if (!pool) return 0;
   const N = Object.keys(state.players).length;
   const levelContext = { denoms, levels, levelIndex: currentLevel };
-  return maxStacksFromPool(pool, stackResult.totalValue, N, levelContext);
+  const physicalMax = maxStacksFromPool(pool, stackResult.totalValue, N, levelContext);
+  const budgetLeft = REBUY_BUDGET_CAP - totalRebuysSoFar(state);
+  return Math.max(0, Math.min(physicalMax, budgetLeft));
 }
 
 // то же самое, но для КАЖДОГО уровня отдельно — для таблицы правил, где на каждой строке
@@ -1043,9 +1051,11 @@ function maxRebuyStacksByLevel(state) {
   const pool = poolAfterRebuysSoFar(state);
   if (!pool) return levels.map(() => 0);
   const N = Object.keys(state.players).length;
+  const budgetLeft = REBUY_BUDGET_CAP - totalRebuysSoFar(state);
   return levels.map((_, i) => {
     if (rebuyRule && rebuyRule[i] === '❌ Запрещены') return 0;
-    return maxStacksFromPool(pool.map(d => ({ ...d })), stackResult.totalValue, N, { denoms, levels, levelIndex: i });
+    const physicalMax = maxStacksFromPool(pool.map(d => ({ ...d })), stackResult.totalValue, N, { denoms, levels, levelIndex: i });
+    return Math.max(0, Math.min(physicalMax, budgetLeft));
   });
 }
 
