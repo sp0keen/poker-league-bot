@@ -948,7 +948,7 @@ function maxStacksFromPool(pool, targetValue, changeBuffer = 0, levelContext = n
     d.value === smallestValue ? { ...d, count: Math.max(0, d.count - changeBuffer) } : { ...d }
   );
   let count = 0;
-  const cap = 20; // разумный потолок итераций, докупок больше в реальной игре не бывает
+  const cap = 16; // больше 16 докупок за игру физически не бывает: макс. 8 игроков × 2 докупки каждому
   while (count < cap) {
     let searchPool = remaining;
     let effectiveToPrinted = null;
