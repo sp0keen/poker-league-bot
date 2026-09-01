@@ -535,11 +535,15 @@ function scoringRulesHtml() {
 
 function rulesHtml() {
   const denoms = STANDARD_CHIPSET;
-  const stackResult = computeStandardStack(denoms, 8);
+  const N = 8;
+  const stackResult = computeStandardStack(denoms, N);
   const levels = computeBlindLevels(denoms);
   const rebuyRule = computeRebuySchedule(levels);
   const denomSchedule = computeDenomSchedule(denoms, levels);
-  return gameRulesHtml({ stackResult, levels, rebuyRule, denomSchedule, buyIn: 0 }) + scoringRulesHtml();
+  const staticReserveStacks = maxUsableStacksFromReserve(denoms, stackResult, N);
+  return (
+    gameRulesHtml({ stackResult, levels, rebuyRule, denomSchedule, buyIn: 0, staticReserveStacks }) + scoringRulesHtml()
+  );
 }
 
 bot.hears(BTN_RULES, ctx => {
@@ -856,7 +860,7 @@ function liveStandingsHtml(state, N, prizes, unit) {
   );
 }
 
-function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, buyIn }) {
+function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, buyIn, staticReserveStacks }) {
   // "докупки в принципе возможны в этой игре" — статичный флаг с момента создания стола, а не
   // то, доступны ли они на ТЕКУЩЕМ уровне (иначе на последних уровнях пропадала бы вся колонка,
   // а не просто "Запрещены" в её последних строках)
@@ -881,7 +885,10 @@ function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, b
       `<h3>🏆 Призовые на текущий момент</h3>` +
       `<table><tr><th>Место</th><th>Приз</th></tr>${prizeTableRows(currentPrizes, unit)}</table>` +
       liveStandingsHtml(state, N, currentPrizes, unit) +
-      moneyLineHtml(state);
+      moneyLineHtml(state) +
+      reserveLineHtml(maxRebuyStacksNow(state));
+  } else {
+    html += reserveLineHtml(staticReserveStacks);
   }
 
   return html;
@@ -925,7 +932,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
     tempoLine +
     `<h2>✅ Игра начата!</h2><ul>${list}</ul>`;
 
-  return header + stackTable + blindsTable + prizeTable + moneyLineHtml(state);
+  return header + stackTable + blindsTable + prizeTable + moneyLineHtml(state) + reserveLineHtml(maxRebuyStacksNow(state));
 }
 
 // сколько ещё стеков стоимостью targetValue можно набрать из остатка фишек — НЕ обязательно
@@ -1382,6 +1389,15 @@ function blindLevelLine(state) {
   const reserveLine =
     stacks == null ? '' : stacks === 0 ? ' · <b>Докупки недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
   return `<p>🟢 <b>Блайнды:</b> ${lv.sb}/${lv.bb} (уровень ${idx + 1}/${levels.length})${reserveLine}</p>`;
+}
+
+// отдельной строкой внизу — там, где нет полной строки блайндов (стартовое сообщение турнира,
+// экран правил): stacks === null — нет данных для расчёта (старая игра без сохранённого набора)
+function reserveLineHtml(stacks) {
+  if (stacks == null) return '';
+  return stacks === 0
+    ? `<p>🚫 <b>Докупки недоступны</b> — в наборе не хватает фишек на ещё один стек.</p>`
+    : `<p>💰 <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}</p>`;
 }
 
 // полный статус (кто в игре/выбыл/докупался) — только для главной панели стола по умолчанию;
