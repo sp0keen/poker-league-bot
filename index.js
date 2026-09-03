@@ -27,8 +27,14 @@ const {
   deletePlayer,
   resetPlayerStats,
   deleteGame,
-  updateGameResult
+  updateGameResult,
+  getTitleHolders,
+  getHeadToHead,
+  getPlayerAchievements,
+  checkAndUnlockAchievements
 } = require('./db');
+const { DYNAMIC_TITLES } = require('./titles');
+const { ACHIEVEMENTS } = require('./achievements');
 const {
   STANDARD_CHIPSET,
   TEMPO_PRESETS,
@@ -261,6 +267,102 @@ function levelBadgeShort(points) {
   const emoji = tier ? tier[2].split(' ')[0] : '';
   return `${emoji}${level}`;
 }
+
+// ---------- динамические титулы ----------
+
+// telegramId -> Set титулов, которые он держит сейчас (может быть несколько сразу)
+function titleHoldersIndex(holders) {
+  const map = new Map();
+  for (const [titleId, rows] of Object.entries(holders)) {
+    rows.forEach(r => {
+      if (!map.has(r.telegramId)) map.set(r.telegramId, new Set());
+      map.get(r.telegramId).add(titleId);
+    });
+  }
+  return map;
+}
+
+// один титул для компактных мест (рейтинг, бейдж у имени) — первый по приоритету DYNAMIC_TITLES,
+// который реально держит игрок; если держит несколько — остальные видны только в его профиле
+function pickBadgeTitle(telegramId, holdersIndex) {
+  const held = holdersIndex.get(telegramId);
+  if (!held) return null;
+  return DYNAMIC_TITLES.find(t => held.has(t.id)) || null;
+}
+
+function titlesLineHtml(telegramId, holdersIndex) {
+  const held = DYNAMIC_TITLES.filter(t => holdersIndex.get(telegramId)?.has(t.id));
+  if (!held.length) return '';
+  return `<p>🏅 <b>Титулы:</b> ${held.map(t => t.emoji).join(' ')}</p>`;
+}
+
+// полный справочник — все титулы, что означают, кто держит сейчас. Титулы не выдаются навсегда,
+// это живой снимок текущих лидеров, поэтому держатели пересчитываются заново при каждом открытии
+// ---------- ачивки ----------
+
+function achievementsLineHtml(telegramId) {
+  const unlocked = getPlayerAchievements(telegramId);
+  if (!unlocked.length) return '';
+  const emojis = unlocked
+    .map(u => ACHIEVEMENTS.find(a => a.id === u.id))
+    .filter(Boolean)
+    .map(a => a.emoji)
+    .join(' ');
+  return `<p>🎖 <b>Достижения:</b> ${emojis}</p>`;
+}
+
+function resultsNameMap(results) {
+  return Object.fromEntries(results.map(r => [r.telegramId, r.name]));
+}
+
+// объявление новых ачивок сразу в протоколе — только те, что реально разблокировались этой игрой
+function achievementsAnnounceHtml(unlocked, nameById) {
+  if (!unlocked.length) return '';
+  return unlocked
+    .map(u => {
+      const a = ACHIEVEMENTS.find(x => x.id === u.achievementId);
+      if (!a) return '';
+      return `<p>${a.emoji} <b>${esc(nameById[u.telegramId] || 'Игрок')}</b> разблокировал(а) достижение: ${a.name}!</p>`;
+    })
+    .join('');
+}
+
+function levelsReferenceHtml() {
+  const rows = LEVEL_THRESHOLDS.map((min, i) => {
+    const level = i + 1;
+    return `<tr><td>${level}</td><td>${levelTierName(level)}</td><td>${min}</td></tr>`;
+  }).join('');
+  return (
+    `<h2>📈 Уровни</h2>` +
+    `<p><i>Растут вместе с общим счётом очков в лиге — чем их больше, тем выше уровень.</i></p>` +
+    `<table><tr><th>Уровень</th><th>Тир</th><th>Очков нужно</th></tr>${rows}</table>`
+  );
+}
+
+function titlesReferenceHtml() {
+  const holders = getTitleHolders();
+  const titleRows = DYNAMIC_TITLES.map(t => {
+    const names = (holders[t.id] || []).map(r => esc(r.name)).join(', ') || '—';
+    return `<p>${t.emoji} <b>${t.name}</b> — ${t.description}<br><i>Сейчас держит:</i> ${names}</p>`;
+  }).join('');
+  const achievementRows = ACHIEVEMENTS.map(
+    a => `<p>${a.emoji} <b>${a.name}</b> — ${a.description}</p>`
+  ).join('');
+  return (
+    levelsReferenceHtml() +
+    `<h2>🏅 Титулы</h2>` +
+    `<p><i>Титулы не выдаются навсегда — это живой рейтинг лидеров лиги прямо сейчас, он пересчитывается заново после каждой сыгранной игры.</i></p>` +
+    titleRows +
+    `<h2>🎖 Достижения</h2>` +
+    `<p><i>А эти, наоборот, остаются навсегда — разблокировал один раз и всё.</i></p>` +
+    achievementRows
+  );
+}
+
+bot.action('titles:ref', ctx => {
+  ctx.answerCbQuery();
+  showRichPanelInline(ctx, titlesReferenceHtml(), [[Markup.button.callback('⬅️ Главное меню', 'hist:menu')]]);
+});
 
 // ---------- persistent bottom keyboards: two "pages" — main menu and the game panel ----------
 
@@ -1466,7 +1568,7 @@ function cancelLastEvent(ownerId, state) {
     state.rebuys[last.id]--;
   } else if (last.type === 'BUST') {
     state.busted = state.busted.filter(x => x !== last.id);
-    state.knockouts[last.by]--;
+    if (last.by) state.knockouts[last.by]--;
   }
   setState(ownerId, state);
   return true;
@@ -1568,20 +1670,24 @@ bot.action(/^out1:(\d+)$/, ctx => {
     `❌ Кто выбил ${b(state.players[bustedId])}?`,
     kb([
       ...candidates.map(id => [Markup.button.callback(state.players[id], `out2:${bustedId}:${id}`)]),
+      // на олл-ине против нескольких игроков или просто слив банка без явного финального
+      // оппонента — нокаут никому не засчитывается, но сам факт выбывания зафиксировать всё равно нужно
+      [Markup.button.callback('🤷 Без выбивания (слил банк сам)', `out2:${bustedId}:none`)],
       [Markup.button.callback('⬅️ Назад', 'out:back')]
     ])
   );
 });
 
-bot.action(/^out2:(\d+):(\d+)$/, ctx => {
+bot.action(/^out2:(\d+):(none|\d+)$/, ctx => {
   const ownerId = gameOwnerId(ctx);
   const state = getState(ownerId);
   if (!state) return ctx.answerCbQuery('Нет активной игры');
-  const [, bustedId, byId] = ctx.match;
+  const [, bustedId, byIdRaw] = ctx.match;
+  const byId = byIdRaw === 'none' ? null : byIdRaw;
   if (state.busted.includes(bustedId)) return ctx.answerCbQuery('Этот игрок уже отмечен как выбывший');
 
   state.busted.push(bustedId);
-  state.knockouts[byId] = (state.knockouts[byId] || 0) + 1;
+  if (byId) state.knockouts[byId] = (state.knockouts[byId] || 0) + 1;
   state.log.push({ type: 'BUST', id: bustedId, by: byId, at: new Date().toISOString() });
   setState(ownerId, state);
 
@@ -1595,7 +1701,7 @@ bot.action(/^out2:(\d+):(\d+)$/, ctx => {
   }
 
   const msg =
-    `<p>☠️ <b>${esc(state.players[bustedId])}</b> выбит игроком <b>${esc(state.players[byId])}</b></p>` +
+    `<p>☠️ <b>${esc(state.players[bustedId])}</b> ${byId ? `выбит игроком <b>${esc(state.players[byId])}</b>` : 'выбыл — без явного выбивания'}</p>` +
     statusHtml(state);
   // showRichPanel, не editMessageText — иначе постоянная клавиатура снизу пропадает
   showRichPanel(ctx, msg, gameRows(state));
@@ -1630,8 +1736,11 @@ async function finalizeGame(ctx, state, ownerId) {
   if (isAdmin(ctx)) {
     // владелец подтверждает результаты по умолчанию — спрашивать разрешения не у кого
     saveGameResults(state, results, N);
+    const unlockedAchievements = checkAndUnlockAchievements(state.gameId, results);
     // из БД, а не formatProtocolHtml(state,...): там уже есть застывший snapshot рейтинга до/после
-    const protocol = protocolHtmlFromDb(getGameById(state.gameId));
+    const protocol =
+      protocolHtmlFromDb(getGameById(state.gameId)) +
+      achievementsAnnounceHtml(unlockedAchievements, resultsNameMap(results));
     await showRichPanel(ctx, protocol, menuRows(ctx));
     if (CHANNEL_ID) {
       await sendRich(CHANNEL_ID, protocol);
@@ -1684,7 +1793,10 @@ bot.action(/^appr:([0-9a-f-]+)$/, async ctx => {
 
   removePendingApproval(ctx.match[1]);
   saveGameResults(approval.state, approval.results, approval.N);
-  const protocol = protocolHtmlFromDb(getGameById(approval.state.gameId));
+  const unlockedAchievements = checkAndUnlockAchievements(approval.state.gameId, approval.results);
+  const protocol =
+    protocolHtmlFromDb(getGameById(approval.state.gameId)) +
+    achievementsAnnounceHtml(unlockedAchievements, resultsNameMap(approval.results));
 
   ctx.answerCbQuery('Подтверждено');
   await ctx.deleteMessage().catch(() => {});
@@ -1776,13 +1888,15 @@ function showRatingPage(ctx, mode, page) {
 
   const rows = getRatingPage(mode, page * RATING_PAGE_SIZE, RATING_PAGE_SIZE);
   const cols = ratingColumnsForMode(mode);
+  const holdersIndex = titleHoldersIndex(getTitleHolders());
 
   const body = rows
     .map((r, i) => {
       const idx = page * RATING_PAGE_SIZE + i;
       const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : String(idx + 1);
+      const title = pickBadgeTitle(r.telegram_id, holdersIndex);
       const cells =
-        `<td>${medal}</td><td>${levelBadgeShort(r.total_points)} ${playerLink(r.telegram_id, r.display_name)}</td>` +
+        `<td>${medal}</td><td>${levelBadgeShort(r.total_points)} ${playerLink(r.telegram_id, r.display_name)}${title ? ' ' + title.emoji : ''}</td>` +
         cols.map((c, i2) => `<td>${i2 === 0 ? `<b>${c.get(r)}</b>` : c.get(r)}</td>`).join('');
       return `<tr>${cells}</tr>`;
     })
@@ -1845,12 +1959,18 @@ function statsBodyHtml(p) {
   const chipsLosses = Math.max(0, chipsInvested - chipsWinnings);
   const roiChips = roiOf(chipsWinnings, chipsInvested);
 
+  const h2h = getHeadToHead(p.telegram_id);
+
   const groups = [
     [['📈 Место', `${rank}/${total}`], ['💯 Очков', p.total_points]],
     [['🥇 Побед', `${p.wins} (${winrate}%)`], ['🎮 Игр', p.games], ['💵 В призовых', `${adv.itm || 0} (${itmRate}%)`]],
     [['🆓 Бесплатных', adv.free_games || 0], ['💵 Платных', adv.paid_games || 0]],
     [['📊 Среднее место', avgPlace], ['🏆 Лучший результат', bestGame]],
     [['🔫 Выбиваний', p.knockouts], ['💸 Докупок', p.rebuys]],
+    [
+      ['😈 Заклятый враг', h2h.nemesis ? esc(h2h.nemesis.name) : '—'],
+      ['🎯 Личная жертва', h2h.victim ? esc(h2h.victim.name) : '—']
+    ],
     [
       ['🎰 Выиграно фишек', chipsWinnings],
       ['📉 Проиграно фишек', chipsLosses],
@@ -1868,7 +1988,9 @@ function statsBodyHtml(p) {
     .map(rows => rows.map(([label, value]) => `<tr><td>${label}</td><td align="center"><b>${value}</b></td></tr>`).join(''))
     .join(SPACER);
 
-  return levelBadgeHtml(p.total_points) + `<table>${body}</table>`;
+  const titlesLine = titlesLineHtml(p.telegram_id, titleHoldersIndex(getTitleHolders()));
+  const achievementsLine = achievementsLineHtml(p.telegram_id);
+  return levelBadgeHtml(p.total_points) + titlesLine + achievementsLine + `<table>${body}</table>`;
 }
 
 function meHtml(ctx) {
@@ -1877,7 +1999,10 @@ function meHtml(ctx) {
   return statsBodyHtml(p);
 }
 function sendMe(ctx) {
-  showRichPanelInline(ctx, meHtml(ctx), [[Markup.button.callback('⬅️ Главное меню', 'hist:menu')]]);
+  showRichPanelInline(ctx, meHtml(ctx), [
+    [Markup.button.callback('🏅 Уровни, титулы и достижения', 'titles:ref')],
+    [Markup.button.callback('⬅️ Главное меню', 'hist:menu')]
+  ]);
 }
 bot.command('me', sendMe);
 bot.hears(BTN_ME, sendMe);
@@ -1892,8 +2017,12 @@ function otherPlayerStatsHtml(telegramId) {
 // у админа под чужим профилем — кнопки управления этим игроком
 function showPlayerProfile(ctx, telegramId) {
   const html = otherPlayerStatsHtml(telegramId);
-  if (!isAdmin(ctx)) return showRichPanel(ctx, html, menuRows(ctx));
+  const titleBtn = Markup.button.callback('🏅 Уровни, титулы и достижения', 'titles:ref');
+  if (!isAdmin(ctx)) {
+    return showRichPanelInline(ctx, html, [[titleBtn], [Markup.button.callback('⬅️ Главное меню', 'hist:menu')]]);
+  }
   const rows = [
+    [titleBtn],
     [Markup.button.callback('♻️ Сбросить статистику', `pr:${telegramId}`)],
     [Markup.button.callback('🗑 Удалить игрока', `pd:${telegramId}`)],
     [Markup.button.callback('⬅️ Главное меню', 'hist:menu')]
@@ -2271,7 +2400,7 @@ function eventsLogHtml(events, startedAt, nameById, maxRebuys) {
       const timeLabel = `${fmtTime(e.at)} (+${mins} мин)`;
       let text;
       if (e.type === 'BUST') {
-        text = `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}`;
+        text = e.by ? `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}` : `☠️ ${nameOf(e.id)} выбывает — без явного выбивания`;
       } else {
         rebuyCount[e.id] = (rebuyCount[e.id] || 0) + 1;
         text = `💰 ${nameOf(e.id)} докупается (${rebuyCount[e.id]}/${maxRebuys})`;
