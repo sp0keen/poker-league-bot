@@ -2,6 +2,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { placementPoints } = require('./scoring');
 const { prizeBreakdown } = require('./chipStructure');
+const { MIN_GAMES_FOR_AVG_TITLE } = require('./titles');
 
 // запасной номинальный стек — только для миграции старых записей и как крайний фолбэк;
 // у каждой новой игры реальный стек хранится в games.chip_stack
@@ -43,6 +44,16 @@ db.exec(`
     knockouts INTEGER NOT NULL,
     placement_points REAL NOT NULL,
     total_points REAL NOT NULL
+  );
+
+  -- в отличие от титулов (живой перерасчёт), ачивки разблокируются один раз и остаются навсегда —
+  -- PRIMARY KEY на (telegram_id, achievement_id) сам защищает от повторной разблокировки
+  CREATE TABLE IF NOT EXISTS achievements (
+    telegram_id INTEGER NOT NULL,
+    achievement_id TEXT NOT NULL,
+    game_id TEXT,
+    unlocked_at TEXT NOT NULL,
+    PRIMARY KEY (telegram_id, achievement_id)
   );
 `);
 
@@ -462,6 +473,230 @@ function updateGameResult(gameId, telegramId, { place, rebuys, knockouts }) {
   return { place, rebuys, knockouts, placementPts, total };
 }
 
+// ---------- динамические титулы ----------
+// живой снимок текущих лидеров по каждой категории — пересчитывается при каждом вызове, не
+// хранится нигде отдельно. Возвращает { titleId: [{telegramId, name, value}, ...] } — массив,
+// чтобы поддержать ничьи (несколько человек могут держать один титул одновременно)
+
+// простой случай: у кого больше всего в колонке players (нокауты/игры/докупки) — колонка всегда
+// одна из захардкоженных ниже строк, не пользовательский ввод
+function maxColumnHolders(column) {
+  return db
+    .prepare(
+      `SELECT telegram_id AS telegramId, display_name AS name, ${column} AS value
+       FROM players
+       WHERE ${column} = (SELECT MAX(${column}) FROM players) AND ${column} > 0`
+    )
+    .all();
+}
+
+function getTitleHolders() {
+  const killer = maxColumnHolders('knockouts');
+  const grinder = maxColumnHolders('games');
+  const spender = maxColumnHolders('rebuys');
+
+  // ни разу не докупался, но играет регулярно — это не "максимум", а порог: держат все, кто
+  // подходит под условие, а не только один лидер
+  const cheapskate = db
+    .prepare(
+      `SELECT telegram_id AS telegramId, display_name AS name, games AS value
+       FROM players
+       WHERE rebuys = 0 AND games >= ?`
+    )
+    .all(MIN_GAMES_FOR_AVG_TITLE);
+
+  const podium = db
+    .prepare(
+      `WITH podiums AS (
+         SELECT telegram_id, COUNT(*) AS cnt FROM results WHERE place <= 3 GROUP BY telegram_id
+       )
+       SELECT p.telegram_id AS telegramId, pl.display_name AS name, p.cnt AS value
+       FROM podiums p JOIN players pl ON pl.telegram_id = p.telegram_id
+       WHERE p.cnt = (SELECT MAX(cnt) FROM podiums)`
+    )
+    .all();
+
+  const lastPlace = db
+    .prepare(
+      `WITH lasts AS (
+         SELECT r.telegram_id, COUNT(*) AS cnt
+         FROM results r JOIN games g ON g.id = r.game_id
+         WHERE r.place = g.num_players
+         GROUP BY r.telegram_id
+       )
+       SELECT l.telegram_id AS telegramId, pl.display_name AS name, l.cnt AS value
+       FROM lasts l JOIN players pl ON pl.telegram_id = l.telegram_id
+       WHERE l.cnt = (SELECT MAX(cnt) FROM lasts)`
+    )
+    .all();
+
+  // "пузырь" — место сразу за призовыми (см. prizeBreakdown в chipStructure.js: 2 призовых места
+  // на ≤4 игроков, 3 — на 5+), т.е. первое место, которое НЕ попало в деньги
+  const bubble = db
+    .prepare(
+      `WITH bubbles AS (
+         SELECT r.telegram_id, COUNT(*) AS cnt
+         FROM results r JOIN games g ON g.id = r.game_id
+         WHERE r.place = (CASE WHEN g.num_players <= 4 THEN 3 ELSE 4 END)
+         GROUP BY r.telegram_id
+       )
+       SELECT b.telegram_id AS telegramId, pl.display_name AS name, b.cnt AS value
+       FROM bubbles b JOIN players pl ON pl.telegram_id = b.telegram_id
+       WHERE b.cnt = (SELECT MAX(cnt) FROM bubbles)`
+    )
+    .all();
+
+  const avgs = db
+    .prepare(
+      `SELECT telegram_id, AVG(total_points) AS avgPts, COUNT(*) AS cnt
+       FROM results GROUP BY telegram_id HAVING cnt >= ?`
+    )
+    .all(MIN_GAMES_FOR_AVG_TITLE);
+  const sweat = [];
+  const bot = [];
+  if (avgs.length) {
+    const maxAvg = Math.max(...avgs.map(a => a.avgPts));
+    const minAvg = Math.min(...avgs.map(a => a.avgPts));
+    avgs.forEach(a => {
+      const row = { telegramId: a.telegram_id, name: getPlayerByTelegramId(a.telegram_id).display_name, value: Math.round(a.avgPts * 10) / 10 };
+      if (a.avgPts === maxAvg) sweat.push(row);
+      if (a.avgPts === minAvg && minAvg !== maxAvg) bot.push(row);
+    });
+  }
+
+  // рост/падение в рейтинге за ПОСЛЕДНЮЮ сыгранную игру каждого — не за всю историю, титул про
+  // то, кто сейчас "в ударе" или "проседает", а не кто когда-то давно хорошо зашёл
+  const latestDeltas = db
+    .prepare(
+      `WITH latest AS (
+         SELECT r.telegram_id, r.rank_before, r.rank_after,
+                ROW_NUMBER() OVER (PARTITION BY r.telegram_id ORDER BY g.date DESC) AS rn
+         FROM results r JOIN games g ON g.id = r.game_id
+         WHERE r.rank_before IS NOT NULL AND r.rank_after IS NOT NULL
+       )
+       SELECT telegram_id AS telegramId, (rank_before - rank_after) AS delta
+       FROM latest WHERE rn = 1`
+    )
+    .all();
+  const bull = [];
+  const bear = [];
+  if (latestDeltas.length) {
+    const maxDelta = Math.max(...latestDeltas.map(d => d.delta));
+    const minDelta = Math.min(...latestDeltas.map(d => d.delta));
+    latestDeltas.forEach(d => {
+      const row = { telegramId: d.telegramId, name: getPlayerByTelegramId(d.telegramId).display_name, value: d.delta };
+      if (d.delta === maxDelta && maxDelta > 0) bull.push(row);
+      if (d.delta === minDelta && minDelta < 0) bear.push(row);
+    });
+  }
+
+  return { killer, grinder, spender, cheapskate, podium, lastPlace, bubble, sweat, bot, bull, bear };
+}
+
+// личное соперничество: кто чаще всех выбивал этого игрока (nemesis) и кого чаще всех выбивал
+// он сам (victim). Считается из events_log каждой сыгранной игры (BUST-события) — отдельной
+// таблицы для этого нет, полный скан games на масштабах домашней лиги не проблема
+function getHeadToHead(telegramId) {
+  const rows = db.prepare('SELECT events_log FROM games WHERE events_log IS NOT NULL').all();
+  const knockedOutBy = {};
+  const knockedOut = {};
+  const id = String(telegramId);
+  for (const row of rows) {
+    let log;
+    try {
+      log = JSON.parse(row.events_log);
+    } catch {
+      continue;
+    }
+    for (const ev of log) {
+      if (ev.type !== 'BUST' || !ev.by) continue; // без выбивания (слил банк сам) — не влияет на h2h
+      if (String(ev.id) === id) knockedOutBy[ev.by] = (knockedOutBy[ev.by] || 0) + 1;
+      if (String(ev.by) === id) knockedOut[ev.id] = (knockedOut[ev.id] || 0) + 1;
+    }
+  }
+  const topOf = map => {
+    let bestId = null;
+    let bestCount = 0;
+    for (const [oppId, count] of Object.entries(map)) {
+      if (count > bestCount) {
+        bestId = oppId;
+        bestCount = count;
+      }
+    }
+    if (!bestId) return null;
+    const player = getPlayerByTelegramId(Number(bestId));
+    return { telegramId: Number(bestId), name: player ? player.display_name : 'Игрок', count: bestCount };
+  };
+  return { nemesis: topOf(knockedOutBy), victim: topOf(knockedOut) };
+}
+
+// ---------- ачивки ----------
+
+function getPlayerAchievements(telegramId) {
+  return db
+    .prepare('SELECT achievement_id AS id, unlocked_at AS unlockedAt FROM achievements WHERE telegram_id = ?')
+    .all(telegramId);
+}
+
+// вызывается сразу после saveGameResults для этой же игры — на каждого участника проверяет все
+// условия ачивок и разблокирует новые (INSERT OR IGNORE — за счёт PRIMARY KEY повторная
+// разблокировка молча не делает ничего). results — тот же массив, что передавался в
+// saveGameResults ({telegramId, place, rebuys, knockouts, ...}). Возвращает вновь разблокированные
+// [{telegramId, achievementId}] — чтобы можно было объявить об этом в протоколе
+function checkAndUnlockAchievements(gameId, results) {
+  const N = results.length;
+  const unlockStmt = db.prepare(
+    'INSERT OR IGNORE INTO achievements (telegram_id, achievement_id, game_id, unlocked_at) VALUES (?, ?, ?, ?)'
+  );
+  const streakStmt = db.prepare(
+    `SELECT r.place, g.num_players AS numPlayers
+     FROM results r JOIN games g ON g.id = r.game_id
+     WHERE r.telegram_id = ?
+     ORDER BY g.date DESC LIMIT 3`
+  );
+
+  const unlocked = [];
+  const unlock = (telegramId, achievementId) => {
+    const info = unlockStmt.run(telegramId, achievementId, gameId, new Date().toISOString());
+    if (info.changes > 0) unlocked.push({ telegramId, achievementId });
+  };
+
+  // "Соло" — реально РАЗНЫХ соперников выбил лично, а не просто набрал N-1 нокаутов: если кто-то
+  // докупался и его выбивали повторно, счётчик нокаутов растёт быстрее числа реально выбитых людей
+  const gameRow = db.prepare('SELECT events_log FROM games WHERE id = ?').get(gameId);
+  let bustEvents = [];
+  if (gameRow && gameRow.events_log) {
+    try {
+      bustEvents = JSON.parse(gameRow.events_log).filter(e => e.type === 'BUST' && e.by);
+    } catch {
+      bustEvents = [];
+    }
+  }
+
+  results.forEach(r => {
+    const player = getPlayerByTelegramId(r.telegramId); // уже с учётом этой игры — saveGameResults вызывается раньше
+    if (!player) return;
+
+    if (player.games === 1) unlock(r.telegramId, 'debut');
+    if (r.place === 1 && player.wins === 1) unlock(r.telegramId, 'firstWin');
+    if (r.place === 1 && r.rebuys > 0) unlock(r.telegramId, 'phoenix');
+    if (r.place === 1 && r.rebuys === 0) unlock(r.telegramId, 'skillOnly');
+    const distinctVictims = new Set(
+      bustEvents.filter(e => String(e.by) === String(r.telegramId)).map(e => e.id)
+    );
+    if (N > 1 && distinctVictims.size === N - 1) unlock(r.telegramId, 'solo');
+    if (player.games >= 50) unlock(r.telegramId, 'veteran');
+    if (player.total_points !== 0 && player.total_points % 100 === 0) unlock(r.telegramId, 'round100');
+    if (r.knockouts === 0) unlock(r.telegramId, 'peacemaker');
+
+    const streak = streakStmt.all(r.telegramId);
+    if (streak.length === 3 && streak.every(s => s.place === 1)) unlock(r.telegramId, 'hatTrick');
+    if (streak.length === 3 && streak.every(s => s.place === s.numPlayers)) unlock(r.telegramId, 'rockBottom');
+  });
+
+  return unlocked;
+}
+
 // консистентный snapshot БД для бэкапа через официальный SQLite backup API — в отличие от
 // сырого копирования файла poker.db, корректно учитывает WAL-режим (недавние записи могут
 // лежать только в poker.db-wal, отдельно от основного файла, и наивный fs-копир их бы не увидел)
@@ -502,5 +737,9 @@ module.exports = {
   deleteGame,
   updateGameResult,
   backupDatabaseTo,
-  closeDatabase
+  closeDatabase,
+  getTitleHolders,
+  getHeadToHead,
+  getPlayerAchievements,
+  checkAndUnlockAchievements
 };
