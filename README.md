@@ -74,5 +74,3 @@ npm install
 cp .env.example .env   # заполнить BOT_TOKEN, ADMIN_IDS, CHANNEL_ID
 npm start
 ```
-
-Для деплоя на свой сервер по SSH через GitHub Actions можно взять за основу `.github/workflows/deploy.yml` (запускается вручную, `workflow_dispatch`) — понадобятся свои секреты (SSH-ключ, хост, пользователь) в настройках репозитория.
