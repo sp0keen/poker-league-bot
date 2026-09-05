@@ -4,6 +4,14 @@ Telegram-бот для домашней покерной лиги: органи�
 
 Построен на [Telegraf](https://telegraf.js.org/) (Node.js) и [better-sqlite3](https://github.com/WiseLibs/better-sqlite3).
 
+## Запуск
+
+```bash
+npm install
+cp .env.example .env   # заполнить BOT_TOKEN, ADMIN_IDS, CHANNEL_ID
+npm start
+```
+
 ## Возможности
 
 ### Организация турнира
@@ -66,11 +74,3 @@ backup.js          — сборка/восстановление полного 
 Данные не смешаны с кодом: SQLite-база, файлы состояния и `.env` живут только на сервере и никогда не попадают в репозиторий (см. `.gitignore`).
 
 Все даты и время в сообщениях жёстко приведены к московскому часовому поясу (`APP_TIMEZONE` в `index.js`), независимо от того, в каком часовом поясе физически стоит сервер — поменяйте константу, если лига не по Москве.
-
-## Запуск
-
-```bash
-npm install
-cp .env.example .env   # заполнить BOT_TOKEN, ADMIN_IDS, CHANNEL_ID
-npm start
-```
