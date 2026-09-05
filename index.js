@@ -315,16 +315,49 @@ function resultsNameMap(results) {
   return Object.fromEntries(results.map(r => [r.telegramId, r.name]));
 }
 
-// объявление новых ачивок сразу в протоколе — только те, что реально разблокировались этой игрой
-function achievementsAnnounceHtml(unlocked, nameById) {
-  if (!unlocked.length) return '';
-  return unlocked
-    .map(u => {
-      const a = ACHIEVEMENTS.find(x => x.id === u.achievementId);
-      if (!a) return '';
-      return `<p>${a.emoji} <b>${esc(nameById[u.telegramId] || 'Игрок')}</b> разблокировал(а) достижение: ${a.name}!</p>`;
+// объявление новых ачивок и смен титулов сразу в протоколе — только то, что реально произошло
+// в этой игре. Одинаковые ачивки у нескольких человек за одну игру группируются в одну строку
+// (имена через запятую), а не спамятся по одной строке на каждого
+function achievementsAnnounceLines(unlocked, nameById) {
+  const byAchievement = new Map();
+  unlocked.forEach(u => {
+    if (!byAchievement.has(u.achievementId)) byAchievement.set(u.achievementId, []);
+    byAchievement.get(u.achievementId).push(nameById[u.telegramId] || 'Игрок');
+  });
+  return [...byAchievement.entries()]
+    .map(([achievementId, names]) => {
+      const a = ACHIEVEMENTS.find(x => x.id === achievementId);
+      if (!a) return null;
+      const verb = names.length === 1 ? 'разблокировал(а)' : 'разблокировали';
+      return `${a.emoji} <b>${names.map(esc).join(', ')}</b> ${verb} достижение: ${a.name}!`;
     })
-    .join('');
+    .filter(Boolean);
+}
+
+// какие титулы сменили держателя в результате этой игры — сравнение снимков "до" и "после"
+// (см. вызовы: getTitleHolders() снимается сразу перед saveGameResults и сразу после)
+function titleChangeLines(before, after) {
+  return DYNAMIC_TITLES.map(t => {
+    const oldHolder = before[t.id] && before[t.id][0];
+    const newHolder = after[t.id] && after[t.id][0];
+    if (!newHolder) return null;
+    if (oldHolder && oldHolder.telegramId === newHolder.telegramId) return null;
+    if (!oldHolder) {
+      return `${t.emoji} <b>${t.name}</b> — впервые: ${esc(newHolder.name)}`;
+    }
+    return `${t.emoji} <b>${t.name}</b>: ${esc(oldHolder.name)} → ${esc(newHolder.name)}`;
+  }).filter(Boolean);
+}
+
+function newsAnnounceHtml(achievementLines, titleLines) {
+  let html = '';
+  if (achievementLines.length) {
+    html += `<h3>🎖 Новые достижения</h3>` + achievementLines.map(l => `<p>${l}</p>`).join('');
+  }
+  if (titleLines.length) {
+    html += `<h3>🏅 Новые титулы</h3>` + titleLines.map(l => `<p>${l}</p>`).join('');
+  }
+  return html;
 }
 
 function levelsReferenceHtml() {
@@ -1839,12 +1872,15 @@ async function finalizeGame(ctx, state, ownerId) {
 
   if (isAdmin(ctx)) {
     // владелец подтверждает результаты по умолчанию — спрашивать разрешения не у кого
+    const titlesBefore = getTitleHolders();
     saveGameResults(state, results, N);
     const unlockedAchievements = checkAndUnlockAchievements(state.gameId, results);
+    const news = newsAnnounceHtml(
+      achievementsAnnounceLines(unlockedAchievements, resultsNameMap(results)),
+      titleChangeLines(titlesBefore, getTitleHolders())
+    );
     // из БД, а не formatProtocolHtml(state,...): там уже есть застывший snapshot рейтинга до/после
-    const protocol =
-      protocolHtmlFromDb(getGameById(state.gameId)) +
-      achievementsAnnounceHtml(unlockedAchievements, resultsNameMap(results));
+    const protocol = protocolHtmlFromDb(getGameById(state.gameId)) + news;
     await showRichPanel(ctx, protocol, menuRows(ctx));
     if (CHANNEL_ID) {
       await sendRich(CHANNEL_ID, protocol);
@@ -1896,11 +1932,14 @@ bot.action(/^appr:([0-9a-f-]+)$/, async ctx => {
   if (!approval) return ctx.answerCbQuery('Заявка не найдена или уже обработана', { show_alert: true });
 
   removePendingApproval(ctx.match[1]);
+  const titlesBefore = getTitleHolders();
   saveGameResults(approval.state, approval.results, approval.N);
   const unlockedAchievements = checkAndUnlockAchievements(approval.state.gameId, approval.results);
-  const protocol =
-    protocolHtmlFromDb(getGameById(approval.state.gameId)) +
-    achievementsAnnounceHtml(unlockedAchievements, resultsNameMap(approval.results));
+  const news = newsAnnounceHtml(
+    achievementsAnnounceLines(unlockedAchievements, resultsNameMap(approval.results)),
+    titleChangeLines(titlesBefore, getTitleHolders())
+  );
+  const protocol = protocolHtmlFromDb(getGameById(approval.state.gameId)) + news;
 
   ctx.answerCbQuery('Подтверждено');
   await ctx.deleteMessage().catch(() => {});
@@ -2549,6 +2588,7 @@ function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, ro
   const headerRow =
     '<tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Выигрыш</th><th>Рейтинг</th><th>Докупки</th><th>Выбивания</th></tr>';
 
+  const titleHolders = titleHoldersIndex(getTitleHolders());
   const body = rows
     .map(r => {
       const medal = r.place === 1 ? '🥇' : r.place === 2 ? '🥈' : r.place === 3 ? '🥉' : String(r.place);
@@ -2558,9 +2598,10 @@ function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, ro
       const pointsSign = r.total > 0 ? '+' : '';
       const rankDelta = r.rankDelta;
       const rankLabel = rankDelta == null ? '—' : rankDelta > 0 ? `▲${rankDelta}` : rankDelta < 0 ? `▼${Math.abs(rankDelta)}` : '0';
+      const title = pickBadgeTitle(r.telegramId, titleHolders);
       const cells = [
         `<td>${medal}</td>`,
-        `<td>${levelBadgeShort(careerTotal)} ${playerLink(r.telegramId, r.name)}</td>`,
+        `<td>${levelBadgeShort(careerTotal)} ${playerLink(r.telegramId, r.name)}${title ? ' ' + title.emoji : ''}</td>`,
         `<td><b>${pointsSign}${r.total}</b> (${careerTotal})</td>`,
         `<td>${buyIn ? `${prize} ₽` : prize}</td>`,
         `<td>${rankLabel}</td>`,

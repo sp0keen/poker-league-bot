@@ -477,123 +477,82 @@ function updateGameResult(gameId, telegramId, { place, rebuys, knockouts }) {
 }
 
 // ---------- динамические титулы ----------
-// живой снимок текущих лидеров по каждой категории — пересчитывается при каждом вызове, не
-// хранится нигде отдельно. Возвращает { titleId: [{telegramId, name, value}, ...] } — массив,
-// чтобы поддержать ничьи (несколько человек могут держать один титул одновременно)
-
-// простой случай: у кого больше всего в колонке players (нокауты/игры/докупки) — колонка всегда
-// одна из захардкоженных ниже строк, не пользовательский ввод
-function maxColumnHolders(column) {
-  return db
-    .prepare(
-      `SELECT telegram_id AS telegramId, display_name AS name, ${column} AS value
-       FROM players
-       WHERE ${column} = (SELECT MAX(${column}) FROM players) AND ${column} > 0`
-    )
-    .all();
-}
-
+// титул держит РОВНО один человек — это переходящий рекорд, а не моментальный лидерборд: кто
+// первым дошёл до какого-то значения, тот и держит титул, пока кто-то другой его не побьёт
+// СТРОГО (не сравняет, а именно превзойдёт). Реализовано одним проходом по всей истории игр в
+// хронологическом порядке — при равенстве выигрывает тот, кто добрался до этого значения раньше
+// по времени, естественным образом, без отдельного тай-брейка. Ничего не хранится отдельно,
+// пересчитывается заново при каждом вызове из полной истории (как и раньше)
 function getTitleHolders() {
-  const killer = maxColumnHolders('knockouts');
-  const grinder = maxColumnHolders('games');
-  const spender = maxColumnHolders('rebuys');
-
-  // ни разу не докупался, но играет регулярно — это не "максимум", а порог: держат все, кто
-  // подходит под условие, а не только один лидер
-  const cheapskate = db
+  const rows = db
     .prepare(
-      `SELECT telegram_id AS telegramId, display_name AS name, games AS value
-       FROM players
-       WHERE rebuys = 0 AND games >= ?`
-    )
-    .all(MIN_GAMES_FOR_AVG_TITLE);
-
-  const podium = db
-    .prepare(
-      `WITH podiums AS (
-         SELECT telegram_id, COUNT(*) AS cnt FROM results WHERE place <= 3 GROUP BY telegram_id
-       )
-       SELECT p.telegram_id AS telegramId, pl.display_name AS name, p.cnt AS value
-       FROM podiums p JOIN players pl ON pl.telegram_id = p.telegram_id
-       WHERE p.cnt = (SELECT MAX(cnt) FROM podiums)`
+      `SELECT r.telegram_id AS telegramId, p.display_name AS name, r.place, r.rebuys, r.knockouts,
+              r.total_points AS totalPoints, r.rank_before AS rankBefore, r.rank_after AS rankAfter,
+              g.num_players AS numPlayers, g.date AS date
+       FROM results r
+       JOIN games g ON g.id = r.game_id
+       JOIN players p ON p.telegram_id = r.telegram_id
+       ORDER BY g.date ASC, g.id ASC`
     )
     .all();
 
-  const lastPlace = db
-    .prepare(
-      `WITH lasts AS (
-         SELECT r.telegram_id, COUNT(*) AS cnt
-         FROM results r JOIN games g ON g.id = r.game_id
-         WHERE r.place = g.num_players
-         GROUP BY r.telegram_id
-       )
-       SELECT l.telegram_id AS telegramId, pl.display_name AS name, l.cnt AS value
-       FROM lasts l JOIN players pl ON pl.telegram_id = l.telegram_id
-       WHERE l.cnt = (SELECT MAX(cnt) FROM lasts)`
-    )
-    .all();
+  const running = {}; // telegramId -> бегущие показатели карьеры на момент текущей строки
+  const holders = {}; // titleId -> { telegramId, name, value } — текущий держатель рекорда
 
-  // "пузырь" — место сразу за призовыми (см. prizeBreakdown в chipStructure.js: 2 призовых места
-  // на ≤4 игроков, 3 — на 5+), т.е. первое место, которое НЕ попало в деньги
-  const bubble = db
-    .prepare(
-      `WITH bubbles AS (
-         SELECT r.telegram_id, COUNT(*) AS cnt
-         FROM results r JOIN games g ON g.id = r.game_id
-         WHERE r.place = (CASE WHEN g.num_players <= 4 THEN 3 ELSE 4 END)
-         GROUP BY r.telegram_id
-       )
-       SELECT b.telegram_id AS telegramId, pl.display_name AS name, b.cnt AS value
-       FROM bubbles b JOIN players pl ON pl.telegram_id = b.telegram_id
-       WHERE b.cnt = (SELECT MAX(cnt) FROM bubbles)`
-    )
-    .all();
+  // держатель меняется, только если новое значение СТРОГО лучше — при равенстве прежний остаётся
+  const claim = (titleId, telegramId, name, value, isBetter) => {
+    const cur = holders[titleId];
+    if (!cur || isBetter(value, cur.value)) holders[titleId] = { telegramId, name, value };
+  };
+  const higher = (a, b) => a > b;
+  const lower = (a, b) => a < b;
 
-  const avgs = db
-    .prepare(
-      `SELECT telegram_id, AVG(total_points) AS avgPts, COUNT(*) AS cnt
-       FROM results GROUP BY telegram_id HAVING cnt >= ?`
-    )
-    .all(MIN_GAMES_FOR_AVG_TITLE);
-  const sweat = [];
-  const bot = [];
-  if (avgs.length) {
-    const maxAvg = Math.max(...avgs.map(a => a.avgPts));
-    const minAvg = Math.min(...avgs.map(a => a.avgPts));
-    avgs.forEach(a => {
-      const row = { telegramId: a.telegram_id, name: getPlayerByTelegramId(a.telegram_id).display_name, value: Math.round(a.avgPts * 10) / 10 };
-      if (a.avgPts === maxAvg) sweat.push(row);
-      if (a.avgPts === minAvg && minAvg !== maxAvg) bot.push(row);
-    });
-  }
+  rows.forEach(r => {
+    const id = r.telegramId;
+    if (!running[id]) {
+      running[id] = { knockouts: 0, games: 0, rebuys: 0, podium: 0, last: 0, bubble: 0, pointsSum: 0, neverRebought: true };
+    }
+    const st = running[id];
+    st.knockouts += r.knockouts;
+    st.games += 1;
+    st.rebuys += r.rebuys;
+    st.pointsSum += r.totalPoints;
+    if (r.place <= 3) st.podium++;
+    if (r.place === r.numPlayers) st.last++;
+    const paidPlaces = r.numPlayers <= 4 ? 2 : 3;
+    if (r.place === paidPlaces + 1) st.bubble++;
+    if (r.rebuys > 0) st.neverRebought = false; // одна докупка — и претендентом на "Жаднич" больше не быть, даже задним числом
 
-  // рост/падение в рейтинге за ПОСЛЕДНЮЮ сыгранную игру каждого — не за всю историю, титул про
-  // то, кто сейчас "в ударе" или "проседает", а не кто когда-то давно хорошо зашёл
-  const latestDeltas = db
-    .prepare(
-      `WITH latest AS (
-         SELECT r.telegram_id, r.rank_before, r.rank_after,
-                ROW_NUMBER() OVER (PARTITION BY r.telegram_id ORDER BY g.date DESC) AS rn
-         FROM results r JOIN games g ON g.id = r.game_id
-         WHERE r.rank_before IS NOT NULL AND r.rank_after IS NOT NULL
-       )
-       SELECT telegram_id AS telegramId, (rank_before - rank_after) AS delta
-       FROM latest WHERE rn = 1`
-    )
-    .all();
-  const bull = [];
-  const bear = [];
-  if (latestDeltas.length) {
-    const maxDelta = Math.max(...latestDeltas.map(d => d.delta));
-    const minDelta = Math.min(...latestDeltas.map(d => d.delta));
-    latestDeltas.forEach(d => {
-      const row = { telegramId: d.telegramId, name: getPlayerByTelegramId(d.telegramId).display_name, value: d.delta };
-      if (d.delta === maxDelta && maxDelta > 0) bull.push(row);
-      if (d.delta === minDelta && minDelta < 0) bear.push(row);
-    });
-  }
+    if (st.knockouts > 0) claim('killer', id, r.name, st.knockouts, higher);
+    claim('grinder', id, r.name, st.games, higher);
+    if (st.rebuys > 0) claim('spender', id, r.name, st.rebuys, higher);
+    if (st.podium > 0) claim('podium', id, r.name, st.podium, higher);
+    if (st.last > 0) claim('lastPlace', id, r.name, st.last, higher);
+    if (st.bubble > 0) claim('bubble', id, r.name, st.bubble, higher);
+    // "Жаднич" — не просто порог, а рекорд по числу игр без единой докупки за карьеру
+    if (st.neverRebought && st.games >= MIN_GAMES_FOR_AVG_TITLE) claim('cheapskate', id, r.name, st.games, higher);
 
-  return { killer, grinder, spender, cheapskate, podium, lastPlace, bubble, sweat, bot, bull, bear };
+    if (st.games >= MIN_GAMES_FOR_AVG_TITLE) {
+      const avg = Math.round((st.pointsSum / st.games) * 10) / 10;
+      claim('sweat', id, r.name, avg, higher);
+      claim('bot', id, r.name, avg, lower);
+    }
+
+    // "Бык"/"Медведь" — лучший/худший скачок рейтинга ЗА ОДНУ ИГРУ когда-либо в истории лиги
+    // (рекорд конкретной игры, а не "как у тебя дела в последней" — иначе титул не смог бы
+    // держаться устойчиво: следующая же игра любого игрока переписывала бы его заново)
+    if (r.rankBefore != null && r.rankAfter != null) {
+      const delta = r.rankBefore - r.rankAfter;
+      if (delta > 0) claim('bull', id, r.name, delta, higher);
+      if (delta < 0) claim('bear', id, r.name, delta, lower);
+    }
+  });
+
+  const result = {};
+  ['killer', 'grinder', 'spender', 'cheapskate', 'podium', 'lastPlace', 'bubble', 'sweat', 'bot', 'bull', 'bear'].forEach(titleId => {
+    result[titleId] = holders[titleId] ? [holders[titleId]] : [];
+  });
+  return result;
 }
 
 // личное соперничество: кто чаще всех выбивал этого игрока (nemesis) и кого чаще всех выбивал
