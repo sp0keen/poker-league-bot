@@ -375,6 +375,7 @@ const BTN_RULES = '📋 Правила';
 const BTN_REBUY = '💰 Докупка';
 const BTN_OUT = '❌ Выбывание';
 const BTN_NEXT_LEVEL = '▶️ Следующий уровень';
+const BTN_ADD_PLAYER = '➕ Добавить игрока';
 const BTN_CANCEL = '↩️ Отменить последнее';
 const BTN_GAME_RULES = '📋 Правила турнира';
 const BTN_ENDGAME = '🏁 Завершить турнир';
@@ -410,13 +411,30 @@ function hasRebuyCandidate(state) {
   return state.busted.some(id => state.rebuys[id] < maxRebuys);
 }
 
+// таблица очков за место (scoring.js) определена только для 4-8 игроков — больше в турнир
+// добавлять нельзя технически, а не просто "не стоит"
+const MAX_PLAYERS = 8;
+
+// добавить нового игрока в идущий турнир в принципе можно, если есть кому (зарегистрирован и
+// не занят другим столом) и путь ещё не упёрся в потолок в 8 игроков — хватит ли реально фишек
+// на полноценный стек, проверяем отдельно в момент самого добавления
+function canAddPlayer(state) {
+  return Object.keys(state.players).length < MAX_PLAYERS && getAvailablePlayers().length > 0;
+}
+
 function gameRows(state) {
   const topRow = [
     ...(hasNextLevel(state) ? [BTN_NEXT_LEVEL] : []),
     BTN_OUT,
     ...(state && canRebuyNow(state) && hasRebuyCandidate(state) ? [BTN_REBUY] : [])
   ];
-  return [topRow, [BTN_CANCEL], [BTN_GAME_RULES], [BTN_ENDGAME, BTN_BACK_TO_MENU]];
+  return [
+    topRow,
+    [BTN_CANCEL],
+    ...(canAddPlayer(state) ? [[BTN_ADD_PLAYER]] : []),
+    [BTN_GAME_RULES],
+    [BTN_ENDGAME, BTN_BACK_TO_MENU]
+  ];
 }
 
 function replyKb(rows) {
@@ -1119,10 +1137,15 @@ const REBUY_BUDGET_CAP = 16;
 // произошла (не должно случаться, но на всякий случай)
 function poolAfterRebuysSoFar(state) {
   const { stackResult, denoms } = state.structure;
-  const N = Object.keys(state.players).length;
-  let pool = remainingAfterStacks(denoms, stackResult, N);
-  const usedSoFar = totalRebuysSoFar(state);
-  for (let i = 0; i < usedSoFar; i++) {
+  // originalN — сколько стеков реально розданы "с нуля" при старте; если позже кто-то
+  // присоединился, его стек НЕ клон стартового — он собирается из фактического остатка, тем же
+  // способом, что и докупка (см. ниже extraExtractions), поэтому здесь важно не путать его с
+  // Object.keys(state.players).length, которое к этому моменту уже больше originalN
+  const originalN = state.structure.originalN || Object.keys(state.players).length;
+  let pool = remainingAfterStacks(denoms, stackResult, originalN);
+  const joinedCount = Math.max(0, Object.keys(state.players).length - originalN);
+  const extraExtractions = totalRebuysSoFar(state) + joinedCount;
+  for (let i = 0; i < extraExtractions; i++) {
     const attempt = computeTargetStack(pool, 1, stackResult.totalValue, 1);
     if (attempt.totalValue < stackResult.totalValue) return null;
     pool = pool.map(d => {
@@ -1355,7 +1378,18 @@ async function createGame(ctx, pending) {
     chipStack: stackValue,
     rebuysAllowed,
     blindLevel: 0,
-    structure: { stackResult, levels, rebuyRule, denomSchedule, buyIn, denoms, tempo: pending.tempo || 'normal' },
+    structure: {
+      stackResult,
+      levels,
+      rebuyRule,
+      denomSchedule,
+      buyIn,
+      denoms,
+      tempo: pending.tempo || 'normal',
+      // сколько игроков реально получили стек при старте — отдельно от Object.keys(state.players),
+      // которое может позже вырасти, если кто-то присоединится в процессе (см. poolAfterRebuysSoFar)
+      originalN: N
+    },
     players,
     rebuys: {},
     knockouts: {},
@@ -1554,8 +1588,9 @@ bot.hears(BTN_NEXT_LEVEL, ctx => {
   }
   const levels = state.structure.levels;
   state.blindLevel = Math.min(levels.length - 1, (state.blindLevel || 0) + 1);
-  setState(ownerId, state);
   const lv = levels[state.blindLevel];
+  state.log.push({ type: 'LEVEL', sb: lv.sb, bb: lv.bb, at: new Date().toISOString() });
+  setState(ownerId, state);
   showRichPanel(ctx, `<p>▶️ <b>Новый уровень:</b> ${lv.sb}/${lv.bb}</p>` + statusHtml(state), gameRows(state));
 });
 
@@ -1569,6 +1604,12 @@ function cancelLastEvent(ownerId, state) {
   } else if (last.type === 'BUST') {
     state.busted = state.busted.filter(x => x !== last.id);
     if (last.by) state.knockouts[last.by]--;
+  } else if (last.type === 'LEVEL') {
+    state.blindLevel = Math.max(0, (state.blindLevel || 0) - 1);
+  } else if (last.type === 'JOIN') {
+    delete state.players[last.id];
+    delete state.rebuys[last.id];
+    delete state.knockouts[last.id];
   }
   setState(ownerId, state);
   return true;
@@ -1704,6 +1745,69 @@ bot.action(/^out2:(\d+):(none|\d+)$/, ctx => {
     `<p>☠️ <b>${esc(state.players[bustedId])}</b> ${byId ? `выбит игроком <b>${esc(state.players[byId])}</b>` : 'выбыл — без явного выбивания'}</p>` +
     statusHtml(state);
   // showRichPanel, не editMessageText — иначе постоянная клавиатура снизу пропадает
+  showRichPanel(ctx, msg, gameRows(state));
+});
+
+// --- добавление игрока в идущий турнир (late registration) ---
+
+function addPlayerKeyboard() {
+  const candidates = getAvailablePlayers();
+  return [...candidates.map(p => [Markup.button.callback(p.display_name, `addplayer:${p.telegram_id}`)]), [BACK_TO_STATUS]];
+}
+
+bot.hears(BTN_ADD_PLAYER, ctx => {
+  const state = getState(gameOwnerId(ctx));
+  if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
+  if (!canAddPlayer(state)) {
+    return showPanel(
+      ctx,
+      'Сейчас некого добавить — либо в турнире уже максимум 8 игроков, либо нет свободных зарегистрированных игроков.',
+      replyKb(gameRows(state))
+    );
+  }
+  showPanel(ctx, `➕ ${b('Добавить игрока')}\nКого добавляем?`, kb(addPlayerKeyboard()));
+});
+
+bot.action('addplayer:back', ctx => {
+  const state = getState(gameOwnerId(ctx));
+  if (!state) return ctx.answerCbQuery('Нет активной игры');
+  ctx.answerCbQuery();
+  ctx.editMessageText(`➕ ${b('Добавить игрока')}\nКого добавляем?`, kb(addPlayerKeyboard()));
+});
+
+bot.action(/^addplayer:(\d+)$/, ctx => {
+  const ownerId = gameOwnerId(ctx);
+  const state = getState(ownerId);
+  if (!state) return ctx.answerCbQuery('Нет активной игры');
+  const newId = ctx.match[1];
+  if (state.players[newId]) return ctx.answerCbQuery('Этот игрок уже в турнире');
+  if (Object.keys(state.players).length >= MAX_PLAYERS) return ctx.answerCbQuery('Уже максимум 8 игроков');
+  const player = getPlayerByTelegramId(Number(newId));
+  if (!player) return ctx.answerCbQuery('Игрок не найден');
+
+  // стек новому игроку собирается из фактического остатка набора — точно так же, как докупка,
+  // а не как клон стартового стека (которого физически может уже не быть в целости)
+  const { stackResult } = state.structure;
+  const pool = poolAfterRebuysSoFar(state);
+  const attempt = pool ? computeTargetStack(pool, 1, stackResult.totalValue, 1) : { totalValue: 0 };
+  if (!pool || attempt.totalValue < stackResult.totalValue) {
+    ctx.answerCbQuery();
+    return showRichPanel(
+      ctx,
+      `<p>🚫 <b>Недостаточно фишек в наборе</b>, чтобы выдать новому игроку полноценный стартовый стек (${stackResult.totalValue} ${state.buyIn ? '₽' : 'фишек'}). Физически сейчас можно собрать максимум ${attempt.totalValue}.</p>` +
+        statusHtml(state),
+      gameRows(state)
+    );
+  }
+
+  state.players[newId] = player.display_name;
+  state.rebuys[newId] = 0;
+  state.knockouts[newId] = 0;
+  state.log.push({ type: 'JOIN', id: newId, at: new Date().toISOString() });
+  setState(ownerId, state);
+  ctx.answerCbQuery('Добавлено');
+
+  const msg = `<p>🆕 <b>${esc(player.display_name)}</b> присоединяется к турниру!</p>` + statusHtml(state);
   showRichPanel(ctx, msg, gameRows(state));
 });
 
@@ -2099,8 +2203,8 @@ function showHistoryPage(ctx, page) {
   const rows = games.map(g => [
     Markup.button.callback(
       admin
-        ? `#${g.game_no} · ${new Date(g.date).toLocaleDateString('ru-RU')} · ${g.num_players} игроков${g.buy_in ? ' · 💵' : ''}`
-        : `#${g.game_no} · ${new Date(g.date).toLocaleDateString('ru-RU')} · место ${g.place} · ${g.total_points} очк.`,
+        ? `#${g.game_no} · ${fmtDate(g.date)} · ${g.num_players} игроков${g.buy_in ? ' · 💵' : ''}`
+        : `#${g.game_no} · ${fmtDate(g.date)} · место ${g.place} · ${g.total_points} очк.`,
       `hist:game:${g.game_id}:${page}`
     )
   ]);
@@ -2274,7 +2378,7 @@ bot.command('backup', async ctx => {
     filePath = await createBackupArchive();
     await ctx.replyWithDocument(Input.fromLocalFile(filePath), {
       caption:
-        `🗄 <b>Полный бэкап бота</b> — ${new Date().toLocaleString('ru-RU')}\n` +
+        `🗄 <b>Полный бэкап бота</b> — ${new Date().toLocaleString('ru-RU', { timeZone: APP_TIMEZONE })}\n` +
         `Внутри: БД (игроки, турниры, результаты), активные столы, заявки на подтверждение.\n` +
         `Для восстановления: /restore и пришли этот файл.`,
       parse_mode: 'HTML'
@@ -2379,11 +2483,15 @@ bot.command('help', ctx => {
   showPanel(ctx, lines.join('\n'), replyKb(menuRows(ctx)));
 });
 
+// сервер физически может стоять в любом часовом поясе (сейчас — Europe/Warsaw, UTC+2) — время
+// в сообщениях всегда должно быть московским, а не системным временем машины, на которой крутится бот
+const APP_TIMEZONE = 'Europe/Moscow';
+
 function fmtDate(iso) {
-  return new Date(iso).toLocaleDateString('ru-RU');
+  return new Date(iso).toLocaleDateString('ru-RU', { timeZone: APP_TIMEZONE });
 }
 function fmtTime(iso) {
-  return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  return new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: APP_TIMEZONE });
 }
 
 // rows: [{place, name, total, rebuys, knockouts}], buyIn в рублях (0 если бесплатно)
@@ -2394,13 +2502,17 @@ function eventsLogHtml(events, startedAt, nameById, maxRebuys) {
   const nameOf = id => esc(nameById[id] || 'Игрок');
   const rebuyCount = {};
   const rows = events
-    .filter(e => (e.type === 'BUST' || e.type === 'REBUY') && e.at)
+    .filter(e => (e.type === 'BUST' || e.type === 'REBUY' || e.type === 'LEVEL' || e.type === 'JOIN') && e.at)
     .map(e => {
       const mins = Math.max(0, Math.round((new Date(e.at).getTime() - start) / 60000));
       const timeLabel = `${fmtTime(e.at)} (+${mins} мин)`;
       let text;
       if (e.type === 'BUST') {
         text = e.by ? `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}` : `☠️ ${nameOf(e.id)} выбывает — без явного выбивания`;
+      } else if (e.type === 'LEVEL') {
+        text = `🟢 Новый уровень блайндов: ${e.sb}/${e.bb}`;
+      } else if (e.type === 'JOIN') {
+        text = `🆕 ${nameOf(e.id)} присоединяется к турниру`;
       } else {
         rebuyCount[e.id] = (rebuyCount[e.id] || 0) + 1;
         text = `💰 ${nameOf(e.id)} докупается (${rebuyCount[e.id]}/${maxRebuys})`;

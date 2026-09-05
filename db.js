@@ -251,7 +251,10 @@ function getPlayerAdvancedStats(telegramId) {
   return db.prepare(`
     SELECT
       COUNT(*) AS games,
-      SUM(CASE WHEN placement_points > 0 THEN 1 ELSE 0 END) AS itm,
+      -- "в призовых" = реально оплачиваемое место (топ-2 на ≤4 игроков, топ-3 на 5+ — та же
+      -- раскладка, что и в prizeBreakdown), а НЕ положительные очки: за 3-е место на 4 игроков
+      -- дают +2 очка (обошёл последнее место), но приза за него нет
+      SUM(CASE WHEN r.place <= (CASE WHEN g.num_players <= 4 THEN 2 ELSE 3 END) THEN 1 ELSE 0 END) AS itm,
       AVG(place) AS avg_place,
       MAX(total_points) AS best_game,
       SUM(CASE WHEN g.buy_in = 0 THEN 1 ELSE 0 END) AS free_games,
