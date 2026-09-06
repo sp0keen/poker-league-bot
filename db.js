@@ -185,7 +185,8 @@ const RATING_ORDER_COL = {
   wins: 'p.wins',
   knockouts: 'p.knockouts',
   winningsChips: 'winningsChips',
-  winningsRub: 'winningsRub'
+  winningsRub: 'winningsRub',
+  avgPoints: 'avgPoints'
 };
 
 // одна таблица со всеми метриками сразу (очки/победы/выбивания/докупок/оба выигрыша) —
@@ -227,14 +228,21 @@ function getRatingPage(mode, offset, limit) {
         JOIN games g ON g.id = res.game_id
       )
       WHERE rn = 1
+    ),
+    avg_points AS (
+      SELECT telegram_id, AVG(total_points) AS avgPoints
+      FROM results
+      GROUP BY telegram_id
     )
     SELECT p.telegram_id, p.display_name, p.games, p.total_points, p.wins, p.knockouts, p.rebuys,
            COALESCE(pr.winningsChips, 0) AS winningsChips,
            COALESCE(pr.winningsRub, 0) AS winningsRub,
-           lr.lastResult AS lastResult
+           lr.lastResult AS lastResult,
+           ap.avgPoints AS avgPoints
     FROM players p
     LEFT JOIN prizes pr ON pr.telegram_id = p.telegram_id
     LEFT JOIN last_result lr ON lr.telegram_id = p.telegram_id
+    LEFT JOIN avg_points ap ON ap.telegram_id = p.telegram_id
     ORDER BY ${orderCol} DESC, p.registered_at ASC
     LIMIT ? OFFSET ?
   `).all(limit, offset);
@@ -256,6 +264,7 @@ function getPlayerAdvancedStats(telegramId) {
       -- дают +2 очка (обошёл последнее место), но приза за него нет
       SUM(CASE WHEN r.place <= (CASE WHEN g.num_players <= 4 THEN 2 ELSE 3 END) THEN 1 ELSE 0 END) AS itm,
       AVG(place) AS avg_place,
+      AVG(total_points) AS avg_points,
       MAX(total_points) AS best_game,
       SUM(CASE WHEN g.buy_in = 0 THEN 1 ELSE 0 END) AS free_games,
       SUM(CASE WHEN g.buy_in > 0 THEN 1 ELSE 0 END) AS paid_games
