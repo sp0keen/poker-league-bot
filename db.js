@@ -488,7 +488,7 @@ function getTitleHolders() {
     .prepare(
       `SELECT r.telegram_id AS telegramId, p.display_name AS name, r.place, r.rebuys, r.knockouts,
               r.total_points AS totalPoints, r.rank_before AS rankBefore, r.rank_after AS rankAfter,
-              g.num_players AS numPlayers, g.date AS date
+              g.num_players AS numPlayers, g.date AS date, g.id AS gameId
        FROM results r
        JOIN games g ON g.id = r.game_id
        JOIN players p ON p.telegram_id = r.telegram_id
@@ -538,15 +538,21 @@ function getTitleHolders() {
       claim('bot', id, r.name, avg, lower);
     }
 
-    // "Бык"/"Медведь" — лучший/худший скачок рейтинга ЗА ОДНУ ИГРУ когда-либо в истории лиги
-    // (рекорд конкретной игры, а не "как у тебя дела в последней" — иначе титул не смог бы
-    // держаться устойчиво: следующая же игра любого игрока переписывала бы его заново)
-    if (r.rankBefore != null && r.rankAfter != null) {
-      const delta = r.rankBefore - r.rankAfter;
-      if (delta > 0) claim('bull', id, r.name, delta, higher);
-      if (delta < 0) claim('bear', id, r.name, delta, lower);
-    }
   });
+
+  // "Бык"/"Медведь" — рост/падение рейтинга в ПОСЛЕДНЕМ сыгранном турнире лиги (одна конкретная
+  // игра, а не "у каждого своя последняя" — иначе в титуле мог бы остаться человек, который сам
+  // месяц не играл, просто потому что никто после него не переиграл его старую дельту), среди
+  // тех, кто в нём реально участвовал. Пересчитывается заново каждый раз, а не через claim()
+  if (rows.length) {
+    const lastGameId = rows[rows.length - 1].gameId;
+    const lastGameRows = rows.filter(r => r.gameId === lastGameId && r.rankBefore != null && r.rankAfter != null);
+    lastGameRows.forEach(r => {
+      const delta = r.rankBefore - r.rankAfter;
+      if (delta > 0) claim('bull', r.telegramId, r.name, delta, higher);
+      if (delta < 0) claim('bear', r.telegramId, r.name, delta, lower);
+    });
+  }
 
   const result = {};
   ['killer', 'grinder', 'spender', 'cheapskate', 'podium', 'lastPlace', 'bubble', 'sweat', 'bot', 'bull', 'bear'].forEach(titleId => {
