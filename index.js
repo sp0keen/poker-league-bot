@@ -375,7 +375,7 @@ function levelsReferenceHtml() {
 function titlesReferenceHtml() {
   const holders = getTitleHolders();
   const titleRows = DYNAMIC_TITLES.map(t => {
-    const names = (holders[t.id] || []).map(r => esc(r.name)).join(', ') || '—';
+    const names = (holders[t.id] || []).map(r => `${esc(r.name)} (${r.value})`).join(', ') || '—';
     return `<p>${t.emoji} <b>${t.name}</b> — ${t.description}<br><i>Сейчас держит:</i> ${names}</p>`;
   }).join('');
   const achievementRows = ACHIEVEMENTS.map(
@@ -2006,11 +2006,18 @@ function lastResultLabel(r) {
   return `${sign}${r.lastResult}`;
 }
 
+function avgPointsLabel(r) {
+  if (r.avgPoints == null) return '—';
+  const rounded = Math.round(r.avgPoints * 10) / 10;
+  return `${rounded > 0 ? '+' : ''}${rounded}`;
+}
+
 const RATING_COLS = [
   { key: 'points', label: 'Очки', get: r => r.total_points },
   { key: 'games', label: 'Игр', get: r => r.games },
   { key: 'wins', label: 'Побед', get: r => r.wins },
   { key: 'lastResult', label: 'Последний рез.', get: lastResultLabel },
+  { key: 'avgPoints', label: 'Средний балл', get: avgPointsLabel },
   { key: 'winningsChips', label: 'Выигрыш (фишки)', get: r => r.winningsChips },
   { key: 'winningsRub', label: 'Выигрыш (₽)', get: r => `${r.winningsRub} ₽` },
   { key: 'knockouts', label: 'Выбивания', get: r => r.knockouts },
@@ -2054,7 +2061,7 @@ function showRatingPage(ctx, mode, page) {
   };
   const modeRows = [
     [modeBtn('points', 'Очки'), modeBtn('wins', 'Победы')],
-    [modeBtn('knockouts', 'Выбивания')],
+    [modeBtn('knockouts', 'Выбивания'), modeBtn('avgPoints', 'Средний балл')],
     [modeBtn('winningsChips', 'Выигрыш (фишки)'), modeBtn('winningsRub', 'Выигрыш (₽)')]
   ];
 
@@ -2071,7 +2078,7 @@ function showRatingPage(ctx, mode, page) {
 
 bot.command('rating', ctx => showRatingPage(ctx, 'points', 0));
 bot.hears(BTN_RATING, ctx => showRatingPage(ctx, 'points', 0));
-bot.action(/^rat:(points|wins|knockouts|winningsChips|winningsRub):(\d+)$/, ctx => {
+bot.action(/^rat:(points|wins|knockouts|avgPoints|winningsChips|winningsRub):(\d+)$/, ctx => {
   ctx.answerCbQuery();
   showRatingPage(ctx, ctx.match[1], Number(ctx.match[2]));
 });
@@ -2083,6 +2090,7 @@ function statsBodyHtml(p) {
   const winrate = p.games ? Math.round((100 * p.wins) / p.games) : 0;
   const itmRate = p.games ? Math.round((100 * (adv.itm || 0)) / p.games) : 0;
   const avgPlace = adv.avg_place ? adv.avg_place.toFixed(1) : '—';
+  const avgPoints = adv.avg_points != null ? `${adv.avg_points > 0 ? '+' : ''}${adv.avg_points.toFixed(1)}` : '—';
   const bestGameRow = getPlayerBestGame(p.telegram_id);
   const bestGame = bestGameRow
     ? `<a href="https://t.me/${BOT_USERNAME}?start=game_${bestGameRow.game_id}">${bestGameRow.total_points} очк.</a>`
@@ -2108,7 +2116,7 @@ function statsBodyHtml(p) {
     [['📈 Место', `${rank}/${total}`], ['💯 Очков', p.total_points]],
     [['🥇 Побед', `${p.wins} (${winrate}%)`], ['🎮 Игр', p.games], ['💵 В призовых', `${adv.itm || 0} (${itmRate}%)`]],
     [['🆓 Бесплатных', adv.free_games || 0], ['💵 Платных', adv.paid_games || 0]],
-    [['📊 Среднее место', avgPlace], ['🏆 Лучший результат', bestGame]],
+    [['🎯 Средний балл', avgPoints], ['📊 Среднее место', avgPlace], ['🏆 Лучший результат', bestGame]],
     [['🔫 Выбиваний', p.knockouts], ['💸 Докупок', p.rebuys]],
     [
       ['😈 Заклятый враг', h2h.nemesis ? esc(h2h.nemesis.name) : '—'],
