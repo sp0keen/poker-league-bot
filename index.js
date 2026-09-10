@@ -2008,8 +2008,7 @@ function lastResultLabel(r) {
 
 function avgPointsLabel(r) {
   if (r.avgPoints == null) return '—';
-  const rounded = Math.round(r.avgPoints * 10) / 10;
-  return `${rounded > 0 ? '+' : ''}${rounded}`;
+  return String(Math.round(r.avgPoints * 10) / 10);
 }
 
 const RATING_COLS = [
@@ -2090,7 +2089,7 @@ function statsBodyHtml(p) {
   const winrate = p.games ? Math.round((100 * p.wins) / p.games) : 0;
   const itmRate = p.games ? Math.round((100 * (adv.itm || 0)) / p.games) : 0;
   const avgPlace = adv.avg_place ? adv.avg_place.toFixed(1) : '—';
-  const avgPoints = adv.avg_points != null ? `${adv.avg_points > 0 ? '+' : ''}${adv.avg_points.toFixed(1)}` : '—';
+  const avgPoints = adv.avg_points != null ? String(Math.round(adv.avg_points * 10) / 10) : '—';
   const bestGameRow = getPlayerBestGame(p.telegram_id);
   const bestGame = bestGameRow
     ? `<a href="https://t.me/${BOT_USERNAME}?start=game_${bestGameRow.game_id}">${bestGameRow.total_points} очк.</a>`
