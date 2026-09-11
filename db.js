@@ -516,12 +516,30 @@ function getTitleHolders() {
   const higher = (a, b) => a > b;
   const lower = (a, b) => a < b;
 
-  rows.forEach(r => {
+  // отдельная функция на титул: как получить значение метрики и когда игрок вообще является
+  // претендентом. Вынесено в таблицу (а не как раньше — россыпь claim() внутри одной функции на
+  // строку), потому что порядок вызова claim() внутри игры теперь важен по каждому титулу СВОЙ
+  // (см. комментарий ниже про инкумбента), и это нельзя сделать одной функцией на строку игрока
+  const METRICS = [
+    { title: 'killer', value: st => st.knockouts, eligible: st => st.knockouts > 0, cmp: higher },
+    { title: 'grinder', value: st => st.games, eligible: () => true, cmp: higher },
+    { title: 'spender', value: st => st.rebuys, eligible: st => st.rebuys > 0, cmp: higher },
+    { title: 'podium', value: st => st.podium, eligible: st => st.podium > 0, cmp: higher },
+    { title: 'lastPlace', value: st => st.last, eligible: st => st.last > 0, cmp: higher },
+    { title: 'bubble', value: st => st.bubble, eligible: st => st.bubble > 0, cmp: higher },
+    // "Жаднич" — не просто порог, а рекорд по числу игр без единой докупки за карьеру
+    { title: 'cheapskate', value: st => st.games, eligible: st => st.neverRebought && st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: higher },
+    { title: 'sweat', value: st => Math.round((st.pointsSum / st.games) * 10) / 10, eligible: st => st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: higher },
+    { title: 'bot', value: st => Math.round((st.pointsSum / st.games) * 10) / 10, eligible: st => st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: lower }
+  ];
+
+  const applyRow = r => {
     const id = r.telegramId;
     if (!running[id]) {
-      running[id] = { knockouts: 0, games: 0, rebuys: 0, podium: 0, last: 0, bubble: 0, pointsSum: 0, neverRebought: true };
+      running[id] = { knockouts: 0, games: 0, rebuys: 0, podium: 0, last: 0, bubble: 0, pointsSum: 0, neverRebought: true, name: r.name };
     }
     const st = running[id];
+    st.name = r.name;
     st.knockouts += r.knockouts;
     st.games += 1;
     st.rebuys += r.rebuys;
@@ -531,23 +549,38 @@ function getTitleHolders() {
     const paidPlaces = r.numPlayers <= 4 ? 2 : 3;
     if (r.place === paidPlaces + 1) st.bubble++;
     if (r.rebuys > 0) st.neverRebought = false; // одна докупка — и претендентом на "Жаднич" больше не быть, даже задним числом
+  };
 
-    if (st.knockouts > 0) claim('killer', id, r.name, st.knockouts, higher);
-    claim('grinder', id, r.name, st.games, higher);
-    if (st.rebuys > 0) claim('spender', id, r.name, st.rebuys, higher);
-    if (st.podium > 0) claim('podium', id, r.name, st.podium, higher);
-    if (st.last > 0) claim('lastPlace', id, r.name, st.last, higher);
-    if (st.bubble > 0) claim('bubble', id, r.name, st.bubble, higher);
-    // "Жаднич" — не просто порог, а рекорд по числу игр без единой докупки за карьеру
-    if (st.neverRebought && st.games >= MIN_GAMES_FOR_AVG_TITLE) claim('cheapskate', id, r.name, st.games, higher);
+  // строки одной игры идут подряд (сортировка по g.id это гарантирует), но порядок МЕЖДУ ними
+  // внутри одной игры ничем не определён. Если в одной игре сразу несколько игроков одновременно
+  // долетают до одинакового нового значения по какому-то титулу (например, втроём переходят с 6
+  // на 7 сыгранных игр), то порядок обработки решал бы, кому его отдать — хотя по факту никто
+  // никого не обошёл, все остались при своей ничьей. Поэтому сначала для ВСЕЙ игры целиком
+  // обновляем бегущие показатели (без claim), а затем по каждому титулу отдельно вызываем claim()
+  // в порядке, где действующий держатель (если он играл в этой игре) идёт первым — тогда он
+  // переутверждает себя раньше, чем до него дойдёт претендент с таким же новым значением. Порядок
+  // считается независимо для каждого титула, так как у разных титулов могут быть разные держатели
+  let i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j < rows.length && rows[j].gameId === rows[i].gameId) j++;
+    const gameRows = rows.slice(i, j);
+    gameRows.forEach(applyRow);
 
-    if (st.games >= MIN_GAMES_FOR_AVG_TITLE) {
-      const avg = Math.round((st.pointsSum / st.games) * 10) / 10;
-      claim('sweat', id, r.name, avg, higher);
-      claim('bot', id, r.name, avg, lower);
-    }
+    const participantIds = gameRows.map(r => r.telegramId);
+    METRICS.forEach(({ title, value, eligible, cmp }) => {
+      const holderId = holders[title] ? holders[title].telegramId : null;
+      const order = participantIds.includes(holderId)
+        ? [holderId, ...participantIds.filter(id => id !== holderId)]
+        : participantIds;
+      order.forEach(id => {
+        const st = running[id];
+        if (eligible(st)) claim(title, id, st.name, value(st), cmp);
+      });
+    });
 
-  });
+    i = j;
+  }
 
   // "Бык"/"Медведь" — рост/падение рейтинга в ПОСЛЕДНЕМ сыгранном турнире лиги (одна конкретная
   // игра, а не "у каждого своя последняя" — иначе в титуле мог бы остаться человек, который сам
