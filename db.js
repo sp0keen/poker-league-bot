@@ -528,9 +528,12 @@ function getTitleHolders() {
     { title: 'lastPlace', value: st => st.last, eligible: st => st.last > 0, cmp: higher },
     { title: 'bubble', value: st => st.bubble, eligible: st => st.bubble > 0, cmp: higher },
     // "Жаднич" — не просто порог, а рекорд по числу игр без единой докупки за карьеру
-    { title: 'cheapskate', value: st => st.games, eligible: st => st.neverRebought && st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: higher },
-    { title: 'sweat', value: st => Math.round((st.pointsSum / st.games) * 10) / 10, eligible: st => st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: higher },
-    { title: 'bot', value: st => Math.round((st.pointsSum / st.games) * 10) / 10, eligible: st => st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: lower }
+    { title: 'cheapskate', value: st => st.games, eligible: st => st.neverRebought && st.games >= MIN_GAMES_FOR_AVG_TITLE, cmp: higher }
+    // "Задрот"/"Бот" сюда не входят — средний балл, в отличие от остальных метрик, не растёт
+    // монотонно, поэтому сравнивать его через claim() (держатель меняется только при строго
+    // лучшем значении) нельзя: если чей-то средний балл потом упадёт, "лучшее" значение
+    // осталось бы висеть в claim() навсегда, даже когда у самого игрока оно уже другое. Считаются
+    // отдельно ниже, живым снимком по текущим значениям — как "Бык"/"Медведь"
   ];
 
   const applyRow = r => {
@@ -581,6 +584,16 @@ function getTitleHolders() {
 
     i = j;
   }
+
+  // "Задрот"/"Бот" — лучший/худший ТЕКУЩИЙ средний балл за игру среди всех, у кого набралось
+  // минимум MIN_GAMES_FOR_AVG_TITLE игр. Живой снимок по актуальным running-показателям, а не
+  // claim() по ходу истории — см. комментарий у METRICS
+  Object.entries(running).forEach(([id, st]) => {
+    if (st.games < MIN_GAMES_FOR_AVG_TITLE) return;
+    const avg = Math.round((st.pointsSum / st.games) * 10) / 10;
+    claim('sweat', Number(id), st.name, avg, higher);
+    claim('bot', Number(id), st.name, avg, lower);
+  });
 
   // "Бык"/"Медведь" — рост/падение рейтинга в ПОСЛЕДНЕМ сыгранном турнире лиги (одна конкретная
   // игра, а не "у каждого своя последняя" — иначе в титуле мог бы остаться человек, который сам
