@@ -405,8 +405,8 @@ const BTN_HISTORY = '📜 История';
 const BTN_NEWGAME = '🎮 Новая игра';
 const BTN_CHANNEL = '📢 Telegram-канал';
 const BTN_RULES = '📋 Правила';
-const BTN_REBUY = '💰 Докупка';
-const BTN_OUT = '❌ Выбывание';
+const BTN_REBUY = '💰 Re-entry';
+const BTN_OUT = '❌ Knockout';
 const BTN_NEXT_LEVEL = '▶️ Следующий уровень';
 const BTN_ADD_PLAYER = '➕ Добавить игрока';
 const BTN_CANCEL = '↩️ Отменить последнее';
@@ -636,7 +636,7 @@ bot.action(/^ag:abort:(\d+)$/, ctx => {
   ctx.answerCbQuery();
   showRichPanelInline(
     ctx,
-    '<p>🗑 Точно отменить этот турнир целиком? Все его данные (докупки, выбивания) потеряются без возможности восстановить. Статистику это не тронет — она и так ещё не записана.</p>',
+    '<p>🗑 Точно отменить этот турнир целиком? Все его данные (re-entry, knockouts) потеряются без возможности восстановить. Статистику это не тронет — она и так ещё не записана.</p>',
     [[{ text: '✅ Да, отменить', callback_data: `ag:abortConfirm:${ownerId}` }, { text: '❌ Не трогать', callback_data: 'hist:menu' }]]
   );
 });
@@ -681,8 +681,8 @@ function scoringRulesHtml() {
   return (
     `<h3>🏅 Очки за место</h3>` +
     `<table><tr><th>Игроков</th><th>Очки за место</th></tr>${rows}</table>` +
-    `<p>🔪 <b>Выбивание:</b> +1 очко тому, кто выбил.<br>` +
-    `💰 <b>Докупка:</b> −2 очка за каждую (максимум 2 докупки на игрока).</p>`
+    `<p>🔪 <b>Knockout:</b> +1 очко тому, кто выбил.<br>` +
+    `💰 <b>Re-entry:</b> −2 очка за каждую (максимум 2 re-entry на игрока).</p>`
   );
 }
 
@@ -798,7 +798,7 @@ bot.action('ng:chip:custom', ctx => {
 
 function buyInPrompt() {
   return {
-    text: `💵 ${b('Формат игры')}\nБесплатно, или на деньги (бай-ин = целевой стек, докупка — по той же цене)?`,
+    text: `💵 ${b('Формат игры')}\nБесплатно, или на деньги (бай-ин = целевой стек, re-entry — по той же цене)?`,
     keyboard: kb([
       [Markup.button.callback('🆓 Бесплатно', 'ng:free')],
       [
@@ -943,15 +943,15 @@ function blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxSta
       )
       .join('');
     return (
-      `<h3>📈 Блайнды, номиналы в игре и докупки</h3>` +
-      `<table><tr><th>Блайнды</th><th>Активные номиналы</th><th>Докупки</th></tr>${rows}</table>`
+      `<h3>📈 Блайнды, номиналы в игре и re-entry</h3>` +
+      `<table><tr><th>Блайнды</th><th>Активные номиналы</th><th>Re-entry</th></tr>${rows}</table>`
     );
   }
   const rows = levels.map((lv, i) => `<tr><td>${blindsCell(i)}</td><td>${denomSchedule[i]}</td></tr>`).join('');
   return (
     `<h3>📈 Блайнды и номиналы в игре</h3>` +
     `<table><tr><th>Блайнды</th><th>Активные номиналы</th></tr>${rows}</table>` +
-    `<p>🚫 <i>Докупки недоступны — в наборе не хватает фишек на ещё один стек.</i></p>`
+    `<p>🚫 <i>Re-entry недоступны — в наборе не хватает фишек на ещё один стек.</i></p>`
   );
 }
 
@@ -1008,7 +1008,7 @@ function liveStandingsHtml(state, N, prizes, unit) {
     .join('');
   return (
     `<h3>📊 Турнирная таблица на текущий момент</h3>` +
-    `<table><tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Приз</th><th>Докупки</th><th>Выбивания</th></tr>${body}</table>` +
+    `<table><tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Приз</th><th>Re-entry</th><th>Knockouts</th></tr>${body}</table>` +
     `<p><i>🟢 — ещё играет: очки за место сюда не входят, оно пока не определено.</i></p>`
   );
 }
@@ -1054,7 +1054,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
   const valueLabel = buyIn ? `${stackResult.totalValue} ₽` : `${stackResult.totalValue}`;
   const list = Object.values(state.players).map(n => `<li>${esc(n)}</li>`).join('');
   const formatLine = buyIn
-    ? `💰 <b>Формат:</b> на деньги, бай-ин <b>${buyIn} ₽</b>${rebuysAllowed ? ` (докупка — тоже ${buyIn} ₽)` : ''}`
+    ? `💰 <b>Формат:</b> на деньги, бай-ин <b>${buyIn} ₽</b>${rebuysAllowed ? ` (re-entry — тоже ${buyIn} ₽)` : ''}`
     : `🆓 <b>Формат:</b> бесплатная игра`;
   const tempo = state.structure && state.structure.tempo;
   const tempoLine = tempo && tempo !== 'normal' ? `<p>⏱ <b>Темп:</b> ${TEMPO_PRESETS[tempo].label}</p>` : '';
@@ -1076,7 +1076,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
   const prizeTable =
     `<h3>🏆 Ожидаемые призовые (старт. банк ${bank} ${unit})</h3>` +
     `<table><tr><th>Место</th><th>Приз</th></tr>${prizeTableRows(prizes, unit)}</table>` +
-    (rebuysAllowed ? `<p><i>Банк и призовые пересчитаются автоматически с учётом докупок по ходу игры.</i></p>` : '');
+    (rebuysAllowed ? `<p><i>Банк и призовые пересчитаются автоматически с учётом re-entry по ходу игры.</i></p>` : '');
 
   const header =
     `<h2>🏆 Турнир №${state.gameNo}</h2>` +
@@ -1259,7 +1259,7 @@ function buildWarnings({ denoms, N, buyIn, stackResult, levels, prizes, rebuysAl
 
   if (!rebuysAllowed) {
     warnings.push(
-      `🚫 Фишек в наборе слишком мало для этого числа игроков — в банке не останется резерва даже на один дополнительный стек. Докупки для этой игры будут отключены, и разменивать фишки во время игры будет физически нечем. Добавь фишек в набор или уменьши число игроков, если докупки важны.`
+      `🚫 Фишек в наборе слишком мало для этого числа игроков — в банке не останется резерва даже на один дополнительный стек. Re-entry для этой игры будут отключены, и разменивать фишки во время игры будет физически нечем. Добавь фишек в набор или уменьши число игроков, если re-entry важны.`
     );
   }
 
@@ -1466,12 +1466,8 @@ function tempoOptions(byTempo, denoms, N) {
   return order.filter(t => survivors.has(t));
 }
 
-function pluralDocupki(n) {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return 'докупка';
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'докупки';
-  return 'докупок';
+function pluralDocupki() {
+  return 're-entry'; // англицизм-заимствование, не склоняется по числам в отличие от "докупка/-и/-ок"
 }
 
 function tempoPromptHtml(byTempo, buyIn, denoms, N, options) {
@@ -1484,7 +1480,7 @@ function tempoPromptHtml(byTempo, buyIn, denoms, N, options) {
     .join('');
   return (
     `<h2>⏱ Темп турнира</h2>` +
-    `<p>Медленный — меньше в стартовый стек, больше остаётся в резерве на докупки. Быстрый — крупнее стеки сразу, но резерва на докупки меньше.</p>` +
+    `<p>Медленный — меньше в стартовый стек, больше остаётся в резерве на re-entry. Быстрый — крупнее стеки сразу, но резерва на re-entry меньше.</p>` +
     `<table><tr><th>Темп</th><th>Стартовый стек</th><th>Резерв</th></tr>${rows}</table>`
   );
 }
@@ -1556,7 +1552,7 @@ function blindLevelLine(state) {
   const hasStructure = state.structure && state.structure.denoms;
   const stacks = hasStructure ? maxRebuyStacksNow(state) : null;
   const reserveLine =
-    stacks == null ? '' : stacks === 0 ? ' · <b>Докупки недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
+    stacks == null ? '' : stacks === 0 ? ' · <b>Re-entry недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
   return `<p>🟢 <b>Блайнды:</b> ${lv.sb}/${lv.bb} (уровень ${idx + 1}/${levels.length})${reserveLine}</p>`;
 }
 
@@ -1565,7 +1561,7 @@ function blindLevelLine(state) {
 function reserveLineHtml(stacks) {
   if (stacks == null) return '';
   return stacks === 0
-    ? `<p>🚫 <b>Докупки недоступны</b> — в наборе не хватает фишек на ещё один стек.</p>`
+    ? `<p>🚫 <b>Re-entry недоступны</b> — в наборе не хватает фишек на ещё один стек.</p>`
     : `<p>💰 <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}</p>`;
 }
 
@@ -1589,7 +1585,7 @@ function statusHtml(state) {
     .map(id => `<tr><td>${esc(state.players[id])}</td><td>${state.rebuys[id]}/${maxRebuys}</td></tr>`)
     .join('');
   const rebuysBlock = rebuyRows
-    ? `<h3>💰 Докупки</h3><table><tr><th>Игрок</th><th>Кол-во</th></tr>${rebuyRows}</table>`
+    ? `<h3>💰 Re-entry</h3><table><tr><th>Игрок</th><th>Кол-во</th></tr>${rebuyRows}</table>`
     : '';
   const eventsBlock = eventsLogHtml(state.log, state.date, state.players, maxRebuys);
   return (
@@ -1673,16 +1669,16 @@ bot.hears(BTN_REBUY, ctx => {
   const state = getState(gameOwnerId(ctx));
   if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
   if (!canRebuyNow(state)) {
-    return showPanel(ctx, '🚫 Докупки недоступны — в наборе не хватает фишек на ещё один стек.', replyKb(gameRows(state)));
+    return showPanel(ctx, '🚫 Re-entry недоступны — в наборе не хватает фишек на ещё один стек.', replyKb(gameRows(state)));
   }
   const maxRebuys = maxRebuysConfigured(state);
   const candidates = state.busted.filter(id => state.rebuys[id] < maxRebuys);
   if (!candidates.length) {
-    return showPanel(ctx, `Докупаться некому (никто не выбыл, либо у всех уже ${maxRebuys}/${maxRebuys} докупок).`, replyKb(gameRows(state)));
+    return showPanel(ctx, `Докупаться некому (никто не выбыл, либо у всех уже ${maxRebuys}/${maxRebuys} re-entry).`, replyKb(gameRows(state)));
   }
   showPanel(
     ctx,
-    `💰 ${b('Докупка')}\nКто возвращается за стол?`,
+    `💰 ${b('Re-entry')}\nКто возвращается за стол?`,
     kb([...candidates.map(id => [Markup.button.callback(state.players[id], `rebuy:${id}`)]), [BACK_TO_STATUS]])
   );
 });
@@ -1691,11 +1687,11 @@ bot.action(/^rebuy:(\d+)$/, ctx => {
   const ownerId = gameOwnerId(ctx);
   const state = getState(ownerId);
   if (!state) return ctx.answerCbQuery('Нет активной игры');
-  if (!canRebuyNow(state)) return ctx.answerCbQuery('Докупки недоступны — фишек не хватит');
+  if (!canRebuyNow(state)) return ctx.answerCbQuery('Re-entry недоступны — фишек не хватит');
   const id = ctx.match[1];
   if (!state.players[id]) return ctx.answerCbQuery('Игрок не найден');
   const bustedIndex = state.busted.indexOf(id);
-  if (bustedIndex === -1) return ctx.answerCbQuery('Игрок не выбыл — докупка не нужна');
+  if (bustedIndex === -1) return ctx.answerCbQuery('Игрок не выбыл — re-entry не нужен');
   state.busted.splice(bustedIndex, 1); // возвращаем игрока за стол
   state.rebuys[id]++;
   state.log.push({ type: 'REBUY', id, bustedIndex, at: new Date().toISOString() });
@@ -1705,7 +1701,7 @@ bot.action(/^rebuy:(\d+)$/, ctx => {
   // нести постоянную клавиатуру — шлём новое сообщение, чтобы кнопки внизу не пропадали
   showRichPanel(
     ctx,
-    `<p>💰 <b>${esc(state.players[id])}</b> докупился и возвращается за стол ${i(`(докупок: ${state.rebuys[id]}/${maxRebuysConfigured(state)})`)}</p>` +
+    `<p>💰 <b>${esc(state.players[id])}</b> докупился и возвращается за стол ${i(`(re-entry: ${state.rebuys[id]}/${maxRebuysConfigured(state)})`)}</p>` +
       statusHtml(state),
     gameRows(state)
   );
@@ -1724,14 +1720,14 @@ bot.hears(BTN_OUT, ctx => {
   if (remainingPlayers(state).length < 2) {
     return showPanel(ctx, 'Недостаточно игроков в игре для фиксации выбывания.', replyKb(gameRows(state)));
   }
-  showPanel(ctx, `❌ ${b('Выбывание')}\nКто выбыл?`, kb(out1Keyboard(state)));
+  showPanel(ctx, `❌ ${b('Knockout')}\nКто выбыл?`, kb(out1Keyboard(state)));
 });
 
 bot.action('out:back', ctx => {
   const state = getState(gameOwnerId(ctx));
   if (!state) return ctx.answerCbQuery('Нет активной игры');
   ctx.answerCbQuery();
-  ctx.editMessageText(`❌ ${b('Выбывание')}\nКто выбыл?`, kb(out1Keyboard(state)));
+  ctx.editMessageText(`❌ ${b('Knockout')}\nКто выбыл?`, kb(out1Keyboard(state)));
 });
 
 bot.action(/^out1:(\d+)$/, ctx => {
@@ -1746,7 +1742,7 @@ bot.action(/^out1:(\d+)$/, ctx => {
       ...candidates.map(id => [Markup.button.callback(state.players[id], `out2:${bustedId}:${id}`)]),
       // на олл-ине против нескольких игроков или просто слив банка без явного финального
       // оппонента — нокаут никому не засчитывается, но сам факт выбывания зафиксировать всё равно нужно
-      [Markup.button.callback('🤷 Без выбивания (слил банк сам)', `out2:${bustedId}:none`)],
+      [Markup.button.callback('🤷 Без knockout (слил банк сам)', `out2:${bustedId}:none`)],
       [Markup.button.callback('⬅️ Назад', 'out:back')]
     ])
   );
@@ -1775,7 +1771,7 @@ bot.action(/^out2:(\d+):(none|\d+)$/, ctx => {
   }
 
   const msg =
-    `<p>☠️ <b>${esc(state.players[bustedId])}</b> ${byId ? `выбит игроком <b>${esc(state.players[byId])}</b>` : 'выбыл — без явного выбивания'}</p>` +
+    `<p>☠️ <b>${esc(state.players[bustedId])}</b> ${byId ? `выбит игроком <b>${esc(state.players[byId])}</b>` : 'выбыл — без явного knockout'}</p>` +
     statusHtml(state);
   // showRichPanel, не editMessageText — иначе постоянная клавиатура снизу пропадает
   showRichPanel(ctx, msg, gameRows(state));
@@ -1972,7 +1968,7 @@ bot.hears(BTN_ENDGAME, async ctx => {
     return showRichPanelInline(
       ctx,
       `<p>⚠️ За столом ещё ${remaining.length} игрока — обычно турнир так не завершают.</p>` +
-        `<p>Прервать его досрочно? Все данные по событиям (докупки, выбивания) потеряются без возможности восстановить, в статистику и историю турнир не попадёт — точно ли ты этого хочешь?</p>`,
+        `<p>Прервать его досрочно? Все данные по событиям (re-entry, knockouts) потеряются без возможности восстановить, в статистику и историю турнир не попадёт — точно ли ты этого хочешь?</p>`,
       [
         [
           Markup.button.callback('✅ Да, прервать', `eg:earlyEndConfirm:${ownerId}`),
@@ -2019,8 +2015,8 @@ const RATING_COLS = [
   { key: 'avgPoints', label: 'Средний балл', get: avgPointsLabel },
   { key: 'winningsChips', label: 'Выигрыш (фишки)', get: r => r.winningsChips },
   { key: 'winningsRub', label: 'Выигрыш (₽)', get: r => `${r.winningsRub} ₽` },
-  { key: 'knockouts', label: 'Выбивания', get: r => r.knockouts },
-  { key: 'rebuys', label: 'Докупок', get: r => r.rebuys }
+  { key: 'knockouts', label: 'Knockouts', get: r => r.knockouts },
+  { key: 'rebuys', label: 'Re-entry', get: r => r.rebuys }
 ];
 
 function ratingColumnsForMode(mode) {
@@ -2060,7 +2056,7 @@ function showRatingPage(ctx, mode, page) {
   };
   const modeRows = [
     [modeBtn('points', 'Очки'), modeBtn('wins', 'Победы')],
-    [modeBtn('knockouts', 'Выбивания'), modeBtn('avgPoints', 'Средний балл')],
+    [modeBtn('knockouts', 'Knockouts'), modeBtn('avgPoints', 'Средний балл')],
     [modeBtn('winningsChips', 'Выигрыш (фишки)'), modeBtn('winningsRub', 'Выигрыш (₽)')]
   ];
 
@@ -2116,7 +2112,7 @@ function statsBodyHtml(p) {
     [['🥇 Побед', `${p.wins} (${winrate}%)`], ['🎮 Игр', p.games], ['💵 В призовых', `${adv.itm || 0} (${itmRate}%)`]],
     [['🆓 Бесплатных', adv.free_games || 0], ['💵 Платных', adv.paid_games || 0]],
     [['🎯 Средний балл', avgPoints], ['📊 Среднее место', avgPlace], ['🏆 Лучший результат', bestGame]],
-    [['🔫 Выбиваний', p.knockouts], ['💸 Докупок', p.rebuys]],
+    [['🔫 Knockouts', p.knockouts], ['💸 Re-entry', p.rebuys]],
     [
       ['😈 Заклятый враг', h2h.nemesis ? esc(h2h.nemesis.name) : '—'],
       ['🎯 Личная жертва', h2h.victim ? esc(h2h.victim.name) : '—']
@@ -2339,8 +2335,8 @@ function editorScreenHtml(gameId, telegramId) {
     `<h3>✏️ ${esc(r.player_name)}</h3>` +
     `<table>` +
     `<tr><td>Место</td><td><b>${r.place}</b></td></tr>` +
-    `<tr><td>Докупки</td><td><b>${r.rebuys}/2</b></td></tr>` +
-    `<tr><td>Выбивания</td><td><b>${r.knockouts}</b></td></tr>` +
+    `<tr><td>Re-entry</td><td><b>${r.rebuys}/2</b></td></tr>` +
+    `<tr><td>Knockouts</td><td><b>${r.knockouts}</b></td></tr>` +
     `<tr><td>Очки за игру</td><td><b>${r.total_points}</b></td></tr>` +
     `</table>`
   );
@@ -2353,12 +2349,12 @@ function editorButtons(gameId, telegramId, page) {
       Markup.button.callback('Место +', `ea:${gameId}:${telegramId}:p:1:${page}`)
     ],
     [
-      Markup.button.callback('Докупки −', `ea:${gameId}:${telegramId}:r:-1:${page}`),
-      Markup.button.callback('Докупки +', `ea:${gameId}:${telegramId}:r:1:${page}`)
+      Markup.button.callback('Re-entry −', `ea:${gameId}:${telegramId}:r:-1:${page}`),
+      Markup.button.callback('Re-entry +', `ea:${gameId}:${telegramId}:r:1:${page}`)
     ],
     [
-      Markup.button.callback('Выбивания −', `ea:${gameId}:${telegramId}:k:-1:${page}`),
-      Markup.button.callback('Выбивания +', `ea:${gameId}:${telegramId}:k:1:${page}`)
+      Markup.button.callback('Knockouts −', `ea:${gameId}:${telegramId}:k:-1:${page}`),
+      Markup.button.callback('Knockouts +', `ea:${gameId}:${telegramId}:k:1:${page}`)
     ],
     [Markup.button.callback('✅ Готово', `ed:${gameId}:${page}`)]
   ];
@@ -2554,7 +2550,7 @@ function eventsLogHtml(events, startedAt, nameById, maxRebuys) {
       const timeLabel = `${fmtTime(e.at)} (+${mins} мин)`;
       let text;
       if (e.type === 'BUST') {
-        text = e.by ? `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}` : `☠️ ${nameOf(e.id)} выбывает — без явного выбивания`;
+        text = e.by ? `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}` : `☠️ ${nameOf(e.id)} выбывает — без явного knockout`;
       } else if (e.type === 'LEVEL') {
         text = `🟢 Новый уровень блайндов: ${e.sb}/${e.bb}`;
       } else if (e.type === 'JOIN') {
@@ -2593,7 +2589,7 @@ function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, ro
   ];
 
   const headerRow =
-    '<tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Выигрыш</th><th>Рейтинг</th><th>Докупки</th><th>Выбивания</th></tr>';
+    '<tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Выигрыш</th><th>Рейтинг</th><th>Re-entry</th><th>Knockouts</th></tr>';
 
   const titleHolders = titleHoldersIndex(getTitleHolders());
   const body = rows
