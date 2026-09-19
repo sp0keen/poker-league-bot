@@ -12,8 +12,12 @@ const STANDARD_CHIPSET = [
 ];
 
 // эталонная раскладка стартового стека для дефолтного набора 5/10/25/50/100 (проверенная,
-// подобранная руками для удобной игры — не выводится по формуле, поэтому просто зашита как есть)
-const REFERENCE_STACK = { 5: 10, 10: 5, 25: 8, 50: 2, 100: 1 }; // итого 500, 26 фишек
+// подобранная руками для удобной игры — не выводится по формуле, поэтому просто зашита как есть).
+// Цель — 100бб (SB/BB стартового уровня всегда равны младшим двум номиналам, см. computeBlindLevels),
+// а не голая сумма: довесок сверх прежних 500 намеренно взят сотками и полтинниками, а не крупными
+// номиналами — младшие чипы и так уже станут блайндами на ранних уровнях, а не будут лежать мёртвым
+// грузом, как лежала бы, например, фишка 500 при блайндах 5/10
+const REFERENCE_STACK = { 5: 10, 10: 5, 25: 8, 50: 4, 100: 5 }; // итого 1000, 32 фишки
 
 function isReferenceChipset(denoms) {
   const values = denoms.map(d => d.value).sort((a, b) => a - b);
@@ -25,10 +29,23 @@ function isReferenceChipset(denoms) {
 // резерве на докупки/размен. Для бесплатных игр темп ещё и двигает саму целевую сумму стека
 // (медленный — глубже в резерв, быстрый — крупнее стеки сразу), для платных целевая сумма — это
 // бай-ин, темп там только меняет агрессивность использования остатка (reserveFactor)
+// smallestMult/largestMult подобраны так, чтобы на дефолтном наборе (SB/BB = 5/10) обычный темп
+// давал 100бб (было 50бб) — остальные темпы масштабированы от него в тех же пропорциях, что и раньше
+// (медленный — 0.6×, быстрый — 1.6× от обычного), чтобы соотношение темпов не поменялось
 const TEMPO_PRESETS = {
-  slow: { label: 'Медленный', reserveFactor: 0.6, smallestMult: 60, largestMult: 3 },
-  normal: { label: 'Обычный', reserveFactor: 0.8, smallestMult: 100, largestMult: 5 },
-  fast: { label: 'Быстрый', reserveFactor: 0.95, smallestMult: 160, largestMult: 8 }
+  slow: { label: 'Медленный', reserveFactor: 0.6, smallestMult: 120, largestMult: 6 },
+  normal: { label: 'Обычный', reserveFactor: 0.8, smallestMult: 200, largestMult: 10 },
+  fast: { label: 'Быстрый', reserveFactor: 0.95, smallestMult: 320, largestMult: 16 }
+};
+
+// прежние (до перехода на 100бб) множители — запасной вариант для наборов, которым физически не
+// хватает фишек на новую глубину (например тонкий 5/10/20/50×24: на нём и старая цель 500 не всегда
+// набиралась полностью, а новая 1000 недобирает уже сотнями). Раз набор не тянет 100бб — тянем
+// столько, сколько тянул раньше, вместо того чтобы молча выдавать урезанный обрубок от новой цели
+const LEGACY_TEMPO_PRESETS = {
+  slow: { reserveFactor: 0.6, smallestMult: 60, largestMult: 3 },
+  normal: { reserveFactor: 0.8, smallestMult: 100, largestMult: 5 },
+  fast: { reserveFactor: 0.95, smallestMult: 160, largestMult: 8 }
 };
 
 // бесплатная игра / свой набор без суммы бай-ина: фиксированный стартовый стек на игрока
@@ -57,7 +74,14 @@ function computeStandardStack(denoms, N, tempo = 'normal') {
   const smallest = Math.min(...values);
   const largest = Math.max(...values);
   const target = Math.max(smallest * preset.smallestMult, largest * preset.largestMult);
-  return computeTargetStack(denoms, N, target, preset.reserveFactor);
+  const attempt = computeTargetStack(denoms, N, target, preset.reserveFactor);
+  if (attempt.shortfall === 0) return attempt;
+  // набора не хватает на новую (100бб-эквивалентную) глубину — откатываемся на старую цель для
+  // этого темпа, а не отдаём молча урезанный стек от новой. Если не хватает и на неё — вернётся
+  // её собственный (меньший) shortfall, как и было устроено до перехода на 100бб
+  const legacy = LEGACY_TEMPO_PRESETS[tempo] || LEGACY_TEMPO_PRESETS.normal;
+  const legacyTarget = Math.max(smallest * legacy.smallestMult, largest * legacy.largestMult);
+  return computeTargetStack(denoms, N, legacyTarget, legacy.reserveFactor);
 }
 
 // платная игра: набираем стек как можно ближе к targetValue (бай-ин в рублях).
