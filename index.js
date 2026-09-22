@@ -444,12 +444,12 @@ function hasRebuyCandidate(state) {
   return state.busted.some(id => state.rebuys[id] < maxRebuys);
 }
 
-// таблица очков за место (scoring.js) определена только для 4-8 игроков — больше в турнир
+// таблица очков за место (scoring.js) определена только для 4-10 игроков — больше в турнир
 // добавлять нельзя технически, а не просто "не стоит"
-const MAX_PLAYERS = 8;
+const MAX_PLAYERS = 10;
 
 // добавить нового игрока в идущий турнир в принципе можно, если есть кому (зарегистрирован и
-// не занят другим столом) и путь ещё не упёрся в потолок в 8 игроков — хватит ли реально фишек
+// не занят другим столом) и путь ещё не упёрся в потолок в 10 игроков — хватит ли реально фишек
 // на полноценный стек, проверяем отдельно в момент самого добавления
 function canAddPlayer(state) {
   return Object.keys(state.players).length < MAX_PLAYERS && getAvailablePlayers().length > 0;
@@ -884,7 +884,7 @@ function askPlayers(ctx, editable) {
   }
   const pending = pendingNewGame.get(ctx.from.id);
   pending.selected = new Set();
-  const text = `👥 ${b('Участники')}\nВыбери 4–8 игроков:`;
+  const text = `👥 ${b('Участники')}\nВыбери 4–${MAX_PLAYERS} игроков:`;
   const keyboard = kb(newGameKeyboard(pending.selected));
   if (editable) ctx.editMessageText(text, keyboard);
   else ctx.reply(text, keyboard);
@@ -896,7 +896,7 @@ bot.action(/^ng:toggle:(\d+)$/, ctx => {
   const id = Number(ctx.match[1]);
   if (pending.selected.has(id)) pending.selected.delete(id);
   else {
-    if (pending.selected.size >= 8) return ctx.answerCbQuery('Максимум 8 игроков');
+    if (pending.selected.size >= MAX_PLAYERS) return ctx.answerCbQuery(`Максимум ${MAX_PLAYERS} игроков`);
     // подстраховка от гонки: вдруг игрока позвали в другой стол, пока эта клавиатура была открыта
     const stillFree = getActiveGames().every(({ state }) => !state.players[id]);
     if (!stillFree) return ctx.answerCbQuery('Этот игрок уже занят в другом турнире');
@@ -1108,7 +1108,7 @@ function maxStacksFromPool(pool, targetValue, changeBuffer = 0, levelContext = n
     d.value === smallestValue ? { ...d, count: Math.max(0, d.count - changeBuffer) } : { ...d }
   );
   let count = 0;
-  const cap = 16; // больше 16 докупок за игру физически не бывает: макс. 8 игроков × 2 докупки каждому
+  const cap = 20; // больше 20 докупок за игру физически не бывает: макс. 10 игроков × 2 докупки каждому
   while (count < cap) {
     let searchPool = remaining;
     let effectiveToPrinted = null;
@@ -1158,11 +1158,11 @@ function totalRebuysSoFar(state) {
   return Object.values(state.rebuys).reduce((s, r) => s + r, 0);
 }
 
-// абсолютный теоретический потолок докупок за игру: 8 игроков (максимум) × 2 докупки каждому.
+// абсолютный теоретический потолок докупок за игру: 10 игроков (максимум) × 2 докупки каждому.
 // "Резерв" в интерфейсе отсчитывается от этого потолка вниз на фактическое число докупок —
 // а не только от физической вместимости набора — иначе на объёмных наборах фишек (где вместимость
-// намного больше 16) число выглядело бы "залипшим" и не менялось бы после реальных докупок
-const REBUY_BUDGET_CAP = 16;
+// намного больше 20) число выглядело бы "залипшим" и не менялось бы после реальных докупок
+const REBUY_BUDGET_CAP = 20;
 
 // физический остаток набора прямо сейчас: стартовые стеки плюс все фактически случившиеся
 // докупки вычтены (тем же способом, каким они реально собирались — из факт. остатка, а не как
@@ -1365,7 +1365,7 @@ bot.action('ng:editPlayers', ctx => {
   if (!pending) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
   ctx.answerCbQuery();
   if (!pending.selected) pending.selected = new Set();
-  showPanel(ctx, `👥 ${b('Участники')}\nВыбери 4–8 игроков:`, kb(newGameKeyboard(pending.selected)));
+  showPanel(ctx, `👥 ${b('Участники')}\nВыбери 4–${MAX_PLAYERS} игроков:`, kb(newGameKeyboard(pending.selected)));
 });
 
 // getNextGameNo() из БД учитывает только СОХРАНЁННЫЕ игры — если открыто несколько столов
@@ -1488,8 +1488,8 @@ function tempoPromptHtml(byTempo, buyIn, denoms, N, options) {
 bot.action('ng:done', async ctx => {
   const pending = pendingNewGame.get(ctx.from.id);
   if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
-  if (pending.selected.size < 4 || pending.selected.size > 8) {
-    return ctx.answerCbQuery('Нужно от 4 до 8 игроков', { show_alert: true });
+  if (pending.selected.size < 4 || pending.selected.size > MAX_PLAYERS) {
+    return ctx.answerCbQuery(`Нужно от 4 до ${MAX_PLAYERS} игроков`, { show_alert: true });
   }
   ctx.answerCbQuery();
 
@@ -1790,7 +1790,7 @@ bot.hears(BTN_ADD_PLAYER, ctx => {
   if (!canAddPlayer(state)) {
     return showPanel(
       ctx,
-      'Сейчас некого добавить — либо в турнире уже максимум 8 игроков, либо нет свободных зарегистрированных игроков.',
+      `Сейчас некого добавить — либо в турнире уже максимум ${MAX_PLAYERS} игроков, либо нет свободных зарегистрированных игроков.`,
       replyKb(gameRows(state))
     );
   }
@@ -1810,7 +1810,7 @@ bot.action(/^addplayer:(\d+)$/, ctx => {
   if (!state) return ctx.answerCbQuery('Нет активной игры');
   const newId = ctx.match[1];
   if (state.players[newId]) return ctx.answerCbQuery('Этот игрок уже в турнире');
-  if (Object.keys(state.players).length >= MAX_PLAYERS) return ctx.answerCbQuery('Уже максимум 8 игроков');
+  if (Object.keys(state.players).length >= MAX_PLAYERS) return ctx.answerCbQuery(`Уже максимум ${MAX_PLAYERS} игроков`);
   const player = getPlayerByTelegramId(Number(newId));
   if (!player) return ctx.answerCbQuery('Игрок не найден');
 
