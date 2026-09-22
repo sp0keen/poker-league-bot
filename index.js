@@ -80,6 +80,16 @@ if (!ADMIN_IDS.length) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// в личке в диалоге должен висеть только актуальный экран — сообщение пользователя (кнопка
+// reply-клавиатуры, команда, введённый текст) удаляется сразу после обработки. Документы не трогаем:
+// это файл бэкапа для /restore, а бэкапы в чате должны оставаться всегда
+bot.use(async (ctx, next) => {
+  await next();
+  const msg = ctx.message;
+  if (!msg || ctx.chat?.type !== 'private' || msg.document) return;
+  await ctx.telegram.deleteMessage(ctx.chat.id, msg.message_id).catch(() => {});
+});
+
 let BOT_USERNAME = null; // заполняется при старте, нужен для диплинков на профиль игрока
 
 function isAdmin(ctx) {
@@ -167,53 +177,42 @@ function sendRichInline(chatId, html, inlineRows) {
 
 // ---------- single-live-message panel: delete the previous bot message before showing a new one ----------
 
-const lastMessageId = new Map(); // chatId -> message_id of the current live bot message
+// chatId -> message_id[] "живого экрана": всё, что бот показал в ответ на последнее действие
+// (обычно одно сообщение, но список активных турниров — это несколько карточек + панель).
+// Бэкапы, заявки на подтверждение и уведомления сюда не попадают — они остаются в чате
+const liveMessageIds = new Map();
+
+async function clearLiveMessages(ctx) {
+  const chatId = ctx.chat.id;
+  const ids = liveMessageIds.get(chatId) || [];
+  liveMessageIds.delete(chatId);
+  for (const id of ids) {
+    await ctx.telegram.deleteMessage(chatId, id).catch(() => {}); // уже удалено / старше 48ч — не страшно
+  }
+}
+
+function trackLiveMessage(ctx, sent) {
+  const chatId = ctx.chat.id;
+  if (!liveMessageIds.has(chatId)) liveMessageIds.set(chatId, []);
+  liveMessageIds.get(chatId).push(sent.message_id);
+  return sent;
+}
 
 async function showPanel(ctx, text, extra = HTML) {
-  const chatId = ctx.chat.id;
-  const prevId = lastMessageId.get(chatId);
-  if (prevId) {
-    try {
-      await ctx.telegram.deleteMessage(chatId, prevId);
-    } catch (e) {
-      // message already gone / too old to delete — ignore
-    }
-  }
-  const sent = await ctx.reply(text, extra);
-  lastMessageId.set(chatId, sent.message_id);
-  return sent;
+  await clearLiveMessages(ctx);
+  return trackLiveMessage(ctx, await ctx.reply(text, extra));
 }
 
 // как showPanel, но через sendRichMessage (для содержательных экранов с таблицами)
 async function showRichPanel(ctx, html, keyboardRows) {
-  const chatId = ctx.chat.id;
-  const prevId = lastMessageId.get(chatId);
-  if (prevId) {
-    try {
-      await ctx.telegram.deleteMessage(chatId, prevId);
-    } catch (e) {
-      // ignore
-    }
-  }
-  const sent = await sendRich(chatId, html, keyboardRows);
-  lastMessageId.set(chatId, sent.message_id);
-  return sent;
+  await clearLiveMessages(ctx);
+  return trackLiveMessage(ctx, await sendRich(ctx.chat.id, html, keyboardRows));
 }
 
 // как showRichPanel, но с inline-кнопками (для интерактивных списков вроде истории игр)
 async function showRichPanelInline(ctx, html, inlineRows) {
-  const chatId = ctx.chat.id;
-  const prevId = lastMessageId.get(chatId);
-  if (prevId) {
-    try {
-      await ctx.telegram.deleteMessage(chatId, prevId);
-    } catch (e) {
-      // ignore
-    }
-  }
-  const sent = await sendRichInline(chatId, html, inlineRows);
-  lastMessageId.set(chatId, sent.message_id);
-  return sent;
+  await clearLiveMessages(ctx);
+  return trackLiveMessage(ctx, await sendRichInline(ctx.chat.id, html, inlineRows));
 }
 
 // ---------- level system (career total_points ~ ELO) ----------
@@ -539,37 +538,21 @@ bot.hears(BTN_ACTIVE_GAMES, async ctx => {
 
     // турниров несколько (например свой + чужой, где просто зовут поиграть) — отдельное
     // сообщение на каждый: свой стол — играть, остальные — только смотреть в реальном времени
-    const chatId = ctx.chat.id;
-    const prevId = lastMessageId.get(chatId);
-    if (prevId) {
-      try {
-        await ctx.telegram.deleteMessage(chatId, prevId);
-      } catch (e) {
-        // уже удалено/устарело — не страшно
-      }
-    }
+    await clearLiveMessages(ctx);
     for (const game of games) {
       const isMine = game.ownerId === ctx.from.id;
       const rows = [[{ text: isMine ? '▶️ Играть' : '👁 Смотреть', callback_data: isMine ? `ag:play:${game.ownerId}` : `ag:view:${game.ownerId}` }]];
-      // не трогаем lastMessageId здесь — иначе финальный showPanel удалит последнюю карточку
-      await sendRichInline(chatId, activeGameCardHtml(game), rows);
+      trackLiveMessage(ctx, await sendRichInline(ctx.chat.id, activeGameCardHtml(game), rows));
     }
-    return showPanel(ctx, `🕹 Активных турниров: ${games.length}. Выбери один выше.`, replyKb(menuRows(ctx)));
+    // не через showPanel — он снёс бы только что показанные карточки
+    return trackLiveMessage(ctx, await ctx.reply(`🕹 Активных турниров: ${games.length}. Выбери один выше.`, replyKb(menuRows(ctx))));
   }
 
   const games = getActiveGames();
   if (!games.length) return showPanel(ctx, '🕹 Активных турниров нет.', replyKb(menuRows(ctx)));
 
   // отдельное сообщение на каждый турнир — у каждого свои "Войти"/"Удалить", не общая сетка
-  const chatId = ctx.chat.id;
-  const prevId = lastMessageId.get(chatId);
-  if (prevId) {
-    try {
-      await ctx.telegram.deleteMessage(chatId, prevId);
-    } catch (e) {
-      // уже удалено/устарело — не страшно
-    }
-  }
+  await clearLiveMessages(ctx);
   for (const game of games) {
     const rows = [
       [
@@ -577,11 +560,10 @@ bot.hears(BTN_ACTIVE_GAMES, async ctx => {
         { text: '🗑 Удалить', callback_data: `ag:abort:${game.ownerId}` }
       ]
     ];
-    // не трогаем lastMessageId здесь — иначе следующий showPanel сочтёт последнюю карточку
-    // "предыдущим единственным сообщением" и удалит именно её
-    await sendRichInline(chatId, activeGameCardHtml(game), rows);
+    trackLiveMessage(ctx, await sendRichInline(ctx.chat.id, activeGameCardHtml(game), rows));
   }
-  await showPanel(ctx, `🕹 Активных турниров: ${games.length}. Выбери один выше.`, replyKb(menuRows(ctx)));
+  // не через showPanel — он снёс бы только что показанные карточки
+  trackLiveMessage(ctx, await ctx.reply(`🕹 Активных турниров: ${games.length}. Выбери один выше.`, replyKb(menuRows(ctx))));
 });
 
 // вход в свой стол со списка активных турниров (когда их несколько) — не "войти в чужой" как
@@ -851,18 +833,18 @@ bot.on('text', (ctx, next) => {
   if (pending.stage === 'chip_custom') {
     const parsed = parseChipSet(ctx.message.text);
     if (!parsed) {
-      return ctx.reply('Не понял формат. Пример: 5=120,10=120,25=120,50=120,100=120\nПопробуй ещё раз:');
+      return showPanel(ctx, 'Не понял формат. Пример: 5=120,10=120,25=120,50=120,100=120\nПопробуй ещё раз:');
     }
     pending.chipSet = parsed;
     pending.stage = undefined;
     const p = buyInPrompt();
-    return ctx.reply(p.text, p.keyboard);
+    return showPanel(ctx, p.text, p.keyboard);
   }
 
   if (pending.stage === 'buyin_custom') {
     const amount = Number(ctx.message.text.trim().replace(/\s/g, ''));
     if (!Number.isInteger(amount) || amount <= 0) {
-      return ctx.reply('Нужно целое положительное число, например 500. Попробуй ещё раз:');
+      return showPanel(ctx, 'Нужно целое положительное число, например 500. Попробуй ещё раз:');
     }
     pending.buyIn = amount;
     pending.stage = undefined;
@@ -880,14 +862,14 @@ function askPlayers(ctx, editable) {
   if (players.length < 4) {
     pendingNewGame.delete(ctx.from.id);
     const msg = `Свободных игроков (не занятых в других турнирах): ${players.length}. Нужно минимум 4.`;
-    return editable ? ctx.editMessageText(msg) : ctx.reply(msg);
+    return editable ? ctx.editMessageText(msg) : showPanel(ctx, msg);
   }
   const pending = pendingNewGame.get(ctx.from.id);
   pending.selected = new Set();
   const text = `👥 ${b('Участники')}\nВыбери 4–${MAX_PLAYERS} игроков:`;
   const keyboard = kb(newGameKeyboard(pending.selected));
   if (editable) ctx.editMessageText(text, keyboard);
-  else ctx.reply(text, keyboard);
+  else showPanel(ctx, text, keyboard);
 }
 
 bot.action(/^ng:toggle:(\d+)$/, ctx => {
@@ -1939,7 +1921,7 @@ bot.action(/^appr:([0-9a-f-]+)$/, async ctx => {
 
   ctx.answerCbQuery('Подтверждено');
   await ctx.deleteMessage().catch(() => {});
-  await sendRich(ctx.chat.id, `<p>✅ <b>Подтверждено и добавлено в статистику.</b></p>` + protocol);
+  await showRichPanel(ctx, `<p>✅ <b>Подтверждено и добавлено в статистику.</b></p>` + protocol, menuRows(ctx));
   if (CHANNEL_ID) await sendRich(CHANNEL_ID, protocol);
   await sendRich(approval.requestedBy, `<p>✅ <b>Твой турнир подтверждён!</b> Он в статистике и канале.</p>` + protocol).catch(() => {});
   await sendBackupToAdmins(`🗄 Автобэкап после турнира №${approval.state.gameNo}`);
@@ -1953,7 +1935,7 @@ bot.action(/^rej:([0-9a-f-]+)$/, async ctx => {
   removePendingApproval(ctx.match[1]);
   ctx.answerCbQuery('Отклонено');
   await ctx.deleteMessage().catch(() => {});
-  await ctx.reply('❌ Отклонено, в статистику не добавлено.');
+  await showPanel(ctx, '❌ Отклонено, в статистику не добавлено.');
   await ctx.telegram
     .sendMessage(approval.requestedBy, '❌ Организатор лиги отклонил протокол турнира — в статистику он не попал. Уточни детали.')
     .catch(() => {});
@@ -2427,7 +2409,7 @@ bot.command('backup', async ctx => {
     });
   } catch (err) {
     console.error('Ошибка создания бэкапа:', err);
-    await ctx.reply('❌ Не удалось создать бэкап: ' + err.message);
+    await showPanel(ctx, '❌ Не удалось создать бэкап: ' + esc(err.message));
   } finally {
     if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
@@ -2439,7 +2421,8 @@ const restoreCandidates = new Map(); // adminId -> { files, expiresAt }
 bot.command('restore', ctx => {
   if (!isAdmin(ctx)) return;
   pendingRestore.add(ctx.from.id);
-  ctx.reply(
+  showPanel(
+    ctx,
     '📥 Пришли файлом .tar.gz бэкапа (из /backup или из личных сообщений после турнира).\n\n' +
       '⚠️ Это полностью заменит текущие данные бота — игроков, турниры, рейтинг, активные столы. Бот перезапустится сразу после подтверждения.'
   );
@@ -2454,10 +2437,11 @@ bot.on('document', async ctx => {
     const res = await fetch(link.href);
     const buffer = Buffer.from(await res.arrayBuffer());
     const inspected = inspectBackupArchive(buffer);
-    if (!inspected.ok) return ctx.reply('❌ ' + inspected.error);
+    if (!inspected.ok) return showPanel(ctx, '❌ ' + esc(inspected.error));
 
     restoreCandidates.set(ctx.from.id, { files: inspected.files, expiresAt: Date.now() + 10 * 60 * 1000 });
-    await ctx.reply(
+    await showPanel(
+      ctx,
       `⚠️ Точно восстановить бота из файла «${doc.file_name || 'бэкап'}» (${(buffer.length / 1024).toFixed(0)} КБ)?\n\n` +
         `Все текущие данные (игроки, турниры, рейтинг, активные столы) будут ЗАМЕНЕНЫ содержимым архива. Действие необратимо (кроме как восстановлением из другого бэкапа). Перед заменой бот на всякий случай пришлёт бэкап текущего состояния тебе в личку. Бот перезапустится сразу после.`,
       Markup.inlineKeyboard([
@@ -2466,7 +2450,7 @@ bot.on('document', async ctx => {
     );
   } catch (err) {
     console.error('Ошибка обработки файла восстановления:', err);
-    ctx.reply('❌ Не удалось обработать файл: ' + err.message);
+    showPanel(ctx, '❌ Не удалось обработать файл: ' + esc(err.message));
   }
 });
 
