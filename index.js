@@ -37,10 +37,12 @@ const { DYNAMIC_TITLES } = require('./titles');
 const { ACHIEVEMENTS } = require('./achievements');
 const {
   STANDARD_CHIPSET,
-  TEMPO_PRESETS,
   computeStandardStack,
   computeTargetStack,
   computeBlindLevels,
+  blindsLabel,
+  LEVEL_SCHEDULES,
+  REBUY_CLOSED,
   computeRebuySchedule,
   computeDenomSchedule,
   activeDenomsAtLevel,
@@ -182,20 +184,27 @@ function sendRichInline(chatId, html, inlineRows) {
 // Бэкапы, заявки на подтверждение и уведомления сюда не попадают — они остаются в чате
 const liveMessageIds = new Map();
 
-async function clearLiveMessages(ctx) {
-  const chatId = ctx.chat.id;
+// по chatId, а не ctx — таймер уровней меняет экран сам, без действия пользователя
+async function clearLiveMessagesIn(chatId) {
   const ids = liveMessageIds.get(chatId) || [];
   liveMessageIds.delete(chatId);
   for (const id of ids) {
-    await ctx.telegram.deleteMessage(chatId, id).catch(() => {}); // уже удалено / старше 48ч — не страшно
+    await bot.telegram.deleteMessage(chatId, id).catch(() => {}); // уже удалено / старше 48ч — не страшно
   }
 }
 
-function trackLiveMessage(ctx, sent) {
-  const chatId = ctx.chat.id;
+function clearLiveMessages(ctx) {
+  return clearLiveMessagesIn(ctx.chat.id);
+}
+
+function trackLiveMessageIn(chatId, sent) {
   if (!liveMessageIds.has(chatId)) liveMessageIds.set(chatId, []);
   liveMessageIds.get(chatId).push(sent.message_id);
   return sent;
+}
+
+function trackLiveMessage(ctx, sent) {
+  return trackLiveMessageIn(ctx.chat.id, sent);
 }
 
 async function showPanel(ctx, text, extra = HTML) {
@@ -407,6 +416,8 @@ const BTN_RULES = '📋 Правила';
 const BTN_REBUY = '💰 Re-entry';
 const BTN_OUT = '❌ Knockout';
 const BTN_NEXT_LEVEL = '▶️ Следующий уровень';
+const BTN_PAUSE = '⏸ Пауза';
+const BTN_RESUME = '⏯ Продолжить';
 const BTN_ADD_PLAYER = '➕ Добавить игрока';
 const BTN_CANCEL = '↩️ Отменить последнее';
 const BTN_GAME_RULES = '📋 Правила турнира';
@@ -460,9 +471,11 @@ function gameRows(state) {
     BTN_OUT,
     ...(state && canRebuyNow(state) && hasRebuyCandidate(state) ? [BTN_REBUY] : [])
   ];
+  // пауза — только пока есть куда расти: на последнем уровне таймер ничего не отсчитывает
+  const timerRow = state && state.timer && hasNextLevel(state) ? [isTimerPaused(state) ? BTN_RESUME : BTN_PAUSE] : [];
   return [
     topRow,
-    [BTN_CANCEL],
+    [...timerRow, BTN_CANCEL],
     ...(canAddPlayer(state) ? [[BTN_ADD_PLAYER]] : []),
     [BTN_GAME_RULES],
     [BTN_ENDGAME, BTN_BACK_TO_MENU]
@@ -629,6 +642,7 @@ bot.action(/^ag:abortConfirm:(\d+)$/, async ctx => {
   const state = getState(ownerId);
   if (!state) return ctx.answerCbQuery('Этот стол уже закрыт');
   clearState(ownerId);
+  await removeTimerMessage(state);
   if (actingOwner.get(ctx.from.id) === ownerId) actingOwner.delete(ctx.from.id);
   ctx.answerCbQuery('Турнир отменён');
   await showPanel(ctx, '🗑 Турнир отменён.', replyKb(menuRows(ctx)));
@@ -664,7 +678,18 @@ function scoringRulesHtml() {
     `<h3>🏅 Очки за место</h3>` +
     `<table><tr><th>Игроков</th><th>Очки за место</th></tr>${rows}</table>` +
     `<p>🔪 <b>Knockout:</b> +1 очко тому, кто выбил.<br>` +
-    `💰 <b>Re-entry:</b> −2 очка за каждую (максимум 2 re-entry на игрока).</p>`
+    `💰 <b>Re-entry:</b> −2 очка за каждую (максимум 2 re-entry на игрока, пока re-entry открыт).</p>`
+  );
+}
+
+// как устроена игра по времени — сами настройки выбираются перед стартом каждого турнира
+function timeRulesHtml() {
+  return (
+    `<h3>⏱ Уровни по времени</h3>` +
+    `<p>Блайнды растут по таймеру — бот сам повышает уровень и присылает уведомление. Перед стартом выбирается:</p>` +
+    `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.</li>` +
+    `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.</li></ul>` +
+    `<p>💰 <b>Re-entry</b> открыт до конца уровня 150/300 включительно.</p>`
   );
 }
 
@@ -677,7 +702,9 @@ function rulesHtml() {
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const staticReserveStacks = maxUsableStacksFromReserve(denoms, stackResult, N);
   return (
-    gameRulesHtml({ stackResult, levels, rebuyRule, denomSchedule, buyIn: 0, staticReserveStacks }) + scoringRulesHtml()
+    gameRulesHtml({ stackResult, levels, rebuyRule, denomSchedule, buyIn: 0, staticReserveStacks }) +
+    timeRulesHtml() +
+    scoringRulesHtml()
   );
 }
 
@@ -898,15 +925,10 @@ function prizeTableRows(prizes, unit) {
     .join('');
 }
 
-// сколько стеков реально написано в статичном расписании докупок для этого уровня — режем до
-// того, сколько физически позволяет остаток набора (maxStacks), чтобы "До 2 стеков" не вводило
-// в заблуждение, когда набора хватает физически только на 1
-function cappedRebuyLabel(label, maxStacks) {
-  const m = label.match(/(\d+)/);
-  if (!m || maxStacks == null) return label;
-  const cap = Math.min(Number(m[1]), maxStacks);
-  if (cap <= 0) return '❌ Запрещены';
-  return cap === 1 ? 'Только 1 стек' : `До ${cap} стеков`;
+// открыт ли re-entry на уровне: по расписанию турнира и физически (maxStacks — сколько стеков
+// набор ещё способен выдать именно на этом уровне, null — не проверить, старая игра)
+function rebuyCellLabel(label, maxStacks) {
+  return label === REBUY_CLOSED || maxStacks === 0 ? '❌' : '✅';
 }
 
 // без резерва на докупки колонку "Докупки" вообще не показываем — по ней всё равно нечем
@@ -916,24 +938,28 @@ function cappedRebuyLabel(label, maxStacks) {
 // (а не одно число, посчитанное для текущего уровня игры и применённое ко всем строкам сразу)
 // currentLevel (если передан) отмечает зелёным кружком текущий уровень блайндов в игре
 function blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, currentLevel) {
-  const blindsCell = i => `${i === currentLevel ? '🟢 ' : ''}${levels[i].sb}/${levels[i].bb}`;
-  if (rebuysAllowed) {
-    const rows = levels
-      .map(
-        (lv, i) =>
-          `<tr><td>${blindsCell(i)}</td><td>${denomSchedule[i]}</td><td>${cappedRebuyLabel(rebuyRule[i], maxStacksByLevel ? maxStacksByLevel[i] : null)}</td></tr>`
-      )
-      .join('');
-    return (
-      `<h3>📈 Блайнды, номиналы в игре и re-entry</h3>` +
-      `<table><tr><th>Блайнды</th><th>Активные номиналы</th><th>Re-entry</th></tr>${rows}</table>`
-    );
-  }
-  const rows = levels.map((lv, i) => `<tr><td>${blindsCell(i)}</td><td>${denomSchedule[i]}</td></tr>`).join('');
+  const levelCell = i => `${i === currentLevel ? '🟢 ' : ''}${i + 1}`;
+  // у старых игр (до игры по времени) длины уровня нет
+  const hasMinutes = levels.every(lv => lv.minutes);
+  const hasAnte = levels.some(lv => lv.ante);
+  const head =
+    `<th>Ур.</th><th>${hasAnte ? 'SB/BB/Анте' : 'Блайнды'}</th>` +
+    (hasMinutes ? '<th>Мин</th>' : '') +
+    `<th>Номиналы в игре</th>` +
+    (rebuysAllowed ? '<th>Re-entry</th>' : '');
+  const rows = levels
+    .map((lv, i) => {
+      const minutesCell = hasMinutes ? `<td>${lv.minutes}</td>` : '';
+      const rebuyCell = rebuysAllowed
+        ? `<td>${rebuyCellLabel(rebuyRule[i], maxStacksByLevel ? maxStacksByLevel[i] : null)}</td>`
+        : '';
+      return `<tr><td>${levelCell(i)}</td><td>${blindsLabel(lv)}</td>${minutesCell}<td>${denomSchedule[i]}</td>${rebuyCell}</tr>`;
+    })
+    .join('');
   return (
-    `<h3>📈 Блайнды и номиналы в игре</h3>` +
-    `<table><tr><th>Блайнды</th><th>Активные номиналы</th></tr>${rows}</table>` +
-    `<p>🚫 <i>Re-entry недоступны — в наборе не хватает фишек на ещё один стек.</i></p>`
+    `<h3>📈 Уровни блайндов</h3>` +
+    `<table><tr>${head}</tr>${rows}</table>` +
+    (rebuysAllowed ? '' : `<p>🚫 <i>Re-entry недоступны — в наборе не хватает фишек на ещё один стек.</i></p>`)
   );
 }
 
@@ -1038,8 +1064,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
   const formatLine = buyIn
     ? `💰 <b>Формат:</b> на деньги, бай-ин <b>${buyIn} ₽</b>${rebuysAllowed ? ` (re-entry — тоже ${buyIn} ₽)` : ''}`
     : `🆓 <b>Формат:</b> бесплатная игра`;
-  const tempo = state.structure && state.structure.tempo;
-  const tempoLine = tempo && tempo !== 'normal' ? `<p>⏱ <b>Темп:</b> ${TEMPO_PRESETS[tempo].label}</p>` : '';
+  const settingsLine = `<p>${settingsSummary(state.structure)}</p>`;
 
   const stackRows = stackResult.perPlayer
     .map(d => `<tr><td>${d.value}</td><td>${d.take}</td><td>${d.value * d.take}</td></tr>`)
@@ -1064,7 +1089,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
     `<h2>🏆 Турнир №${state.gameNo}</h2>` +
     `<p>📅 ${fmtDate(state.date)} · 🕐 ${fmtTime(state.date)}</p>` +
     `<p>${formatLine}</p>` +
-    tempoLine +
+    settingsLine +
     `<h2>✅ Игра начата!</h2><ul>${list}</ul>`;
 
   return header + stackTable + blindsTable + prizeTable + moneyLineHtml(state) + reserveLineHtml(maxRebuyStacksNow(state));
@@ -1177,9 +1202,9 @@ function maxRebuyStacksNow(state) {
   if (!state.structure || !state.structure.denoms) return null;
   const { stackResult, denoms, levels, rebuyRule } = state.structure;
   const currentLevel = state.blindLevel || 0;
-  // на поздних уровнях докупки закрыты по расписанию турнира (rule of thirds), независимо от
-  // того, физически хватает ли ещё фишек на стек — это про темп игры, а не про наличие фишек
-  if (rebuyRule && rebuyRule[currentLevel] === '❌ Запрещены') return 0;
+  // после уровня закрытия re-entry (computeRebuySchedule) докупки запрещены по регламенту, независимо
+  // от того, физически хватает ли ещё фишек на стек — это про ход турнира, а не про наличие фишек
+  if (rebuyRule && rebuyRule[currentLevel] === REBUY_CLOSED) return 0;
   const pool = poolAfterRebuysSoFar(state);
   if (!pool) return 0;
   const N = Object.keys(state.players).length;
@@ -1200,13 +1225,13 @@ function maxRebuyStacksByLevel(state) {
   const N = Object.keys(state.players).length;
   const budgetLeft = REBUY_BUDGET_CAP - totalRebuysSoFar(state);
   return levels.map((_, i) => {
-    if (rebuyRule && rebuyRule[i] === '❌ Запрещены') return 0;
+    if (rebuyRule && rebuyRule[i] === REBUY_CLOSED) return 0;
     const physicalMax = maxStacksFromPool(pool.map(d => ({ ...d })), stackResult.totalValue, N, { denoms, levels, levelIndex: i });
     return Math.max(0, Math.min(physicalMax, budgetLeft));
   });
 }
 
-// расписание докупок никогда не обещает больше "До 2 стеков" — капаем двойкой
+// максимум 2 re-entry на игрока за игру (меньше — только если набор физически не тянет двух)
 function maxRebuysConfigured(state) {
   if (!state.structure || !state.structure.denoms) return 2; // старые игры без сохранённого набора — обычный лимит
   const { stackResult, denoms } = state.structure;
@@ -1222,11 +1247,10 @@ function canRebuyNow(state) {
 
 // один источник правды для расчёта структуры — использует и старт игры, и проверка
 // рекомендаций перед стартом (evaluateAndProceed), чтобы не считать по-разному в двух местах
-function computeStructureFor(denoms, buyIn, N, tempo = 'normal') {
-  const stackResult = buyIn
-    ? computeTargetStack(denoms, N, buyIn, TEMPO_PRESETS[tempo].reserveFactor)
-    : computeStandardStack(denoms, N, tempo);
-  const levels = computeBlindLevels(denoms);
+// settings — { ante, schedule } с экрана настроек турнира
+function computeStructureFor(denoms, buyIn, N, settings = {}) {
+  const stackResult = buyIn ? computeTargetStack(denoms, N, buyIn) : computeStandardStack(denoms, N);
+  const levels = computeBlindLevels(denoms, settings);
   const rebuyRule = computeRebuySchedule(levels);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const prizes = prizeBreakdown(stackResult.totalValue * N, N);
@@ -1306,7 +1330,7 @@ async function evaluateAndProceed(ctx, pending) {
   const N = pending.selected.size;
   const denoms = pending.chipSet;
   const buyIn = pending.buyIn || 0;
-  const structure = computeStructureFor(denoms, buyIn, N, pending.tempo);
+  const structure = computeStructureFor(denoms, buyIn, N, tournamentSettings(pending));
   const warnings = buildWarnings({ denoms, N, buyIn, ...structure });
   if (!warnings.length) return createGame(ctx, pending);
   showRichPanelInline(ctx, warningsHtml(warnings, { N, buyIn, ...structure }), [
@@ -1370,11 +1394,12 @@ async function createGame(ctx, pending) {
   const denoms = pending.chipSet;
   const buyIn = pending.buyIn || 0;
 
+  const settings = tournamentSettings(pending);
   const { stackResult, levels, rebuyRule, denomSchedule, prizes, rebuysAllowed } = computeStructureFor(
     denoms,
     buyIn,
     N,
-    pending.tempo
+    settings
   );
   const stackValue = stackResult.totalValue;
 
@@ -1400,11 +1425,14 @@ async function createGame(ctx, pending) {
       denomSchedule,
       buyIn,
       denoms,
-      tempo: pending.tempo || 'normal',
+      schedule: settings.schedule,
+      ante: settings.ante,
       // сколько игроков реально получили стек при старте — отдельно от Object.keys(state.players),
       // которое может позже вырасти, если кто-то присоединится в процессе (см. poolAfterRebuysSoFar)
       originalN: N
     },
+    // таймер уровня стартует вместе с игрой (см. "таймер уровней")
+    timer: { levelEndsAt: Date.now() + levels[0].minutes * 60000, pausedRemainingMs: null, messageId: null },
     players,
     rebuys: {},
     knockouts: {},
@@ -1415,56 +1443,82 @@ async function createGame(ctx, pending) {
   setState(ctx.from.id, state);
   pendingNewGame.delete(ctx.from.id);
 
+  // закреп с таймером — раньше панели, чтобы панель оставалась последним сообщением в чате
+  await clearLiveMessages(ctx);
+  await refreshTimerMessage(ctx.from.id);
   const html = gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSchedule, prizes, buyIn });
   await showRichPanel(ctx, html, gameRows(state));
-}
-
-// три темпа сразу — и чтобы решить, стоит ли вообще спрашивать организатора, и чтобы показать
-// сравнение, если спрашиваем. Разница считается ощутимой, если самый быстрый темп даёт стек
-// хотя бы на ~15% крупнее самого медленного, либо у них по-разному доступны докупки — иначе
-// (например, набор фишек слишком тесный, чтобы темп на что-то влиял) молча работаем на обычном
-function stacksByTempo(denoms, buyIn, N) {
-  return {
-    slow: computeStructureFor(denoms, buyIn, N, 'slow'),
-    normal: computeStructureFor(denoms, buyIn, N, 'normal'),
-    fast: computeStructureFor(denoms, buyIn, N, 'fast')
-  };
-}
-
-// какие из трёх темпов реально стоит предлагать: группируем по числу доступных докупок и в
-// каждой группе оставляем только темп с самым крупным стеком — если у двух темпов докупок
-// одинаковое количество, смысла показывать оба нет (меньший стек при том же числе докупок
-// строго хуже, а не другой вариант). Если после этого остался только один — разница
-// не была ощутимой вообще, работаем на "обычном" без вопроса
-function tempoOptions(byTempo, denoms, N) {
-  const order = ['slow', 'normal', 'fast'];
-  const bestForCount = new Map(); // число докупок -> темп с максимальным стеком при этом числе
-  for (const t of order) {
-    const count = maxUsableStacksFromReserve(denoms, byTempo[t].stackResult, N);
-    const cur = bestForCount.get(count);
-    if (!cur || byTempo[t].stackResult.totalValue > byTempo[cur].stackResult.totalValue) bestForCount.set(count, t);
-  }
-  const survivors = new Set(bestForCount.values());
-  return order.filter(t => survivors.has(t));
 }
 
 function pluralDocupki() {
   return 're-entry'; // англицизм-заимствование, не склоняется по числам в отличие от "докупка/-и/-ок"
 }
 
-function tempoPromptHtml(byTempo, buyIn, denoms, N, options) {
-  const unit = buyIn ? '₽' : 'фишек';
-  const rows = options
-    .map(t => {
-      const stacks = maxUsableStacksFromReserve(denoms, byTempo[t].stackResult, N);
-      return `<tr><td>${TEMPO_PRESETS[t].label}</td><td>${byTempo[t].stackResult.totalValue} ${unit}</td><td>${stacks} ${pluralDocupki(stacks)}</td></tr>`;
-    })
-    .join('');
-  return (
-    `<h2>⏱ Темп турнира</h2>` +
-    `<p>Медленный — меньше в стартовый стек, больше остаётся в резерве на re-entry. Быстрый — крупнее стеки сразу, но резерва на re-entry меньше.</p>` +
-    `<table><tr><th>Темп</th><th>Стартовый стек</th><th>Резерв</th></tr>${rows}</table>`
-  );
+// ---------- настройки турнира: длина уровней и анте ----------
+
+function tournamentSettings(pending) {
+  return { schedule: pending.schedule || 'flat', ante: Boolean(pending.ante) };
+}
+
+// "2 ч 20 мин" / "40 мин"
+function fmtHoursMinutes(totalMinutes) {
+  const h = Math.floor(totalMinutes / 60);
+  const m = totalMinutes % 60;
+  if (!h) return `${m} мин`;
+  return m ? `${h} ч ${m} мин` : `${h} ч`;
+}
+
+// индекс последнего уровня, на котором re-entry ещё открыт по расписанию (-1 — нигде)
+function lastRebuyLevel(rebuyRule) {
+  const firstClosed = rebuyRule.indexOf(REBUY_CLOSED);
+  return firstClosed === -1 ? rebuyRule.length - 1 : firstClosed - 1;
+}
+
+// строка настроек для сводки турнира; у старых игр (до игры по времени) их нет
+function settingsSummary(structure) {
+  if (!structure || !structure.schedule) return '';
+  const schedule = LEVEL_SCHEDULES[structure.schedule] || LEVEL_SCHEDULES.flat;
+  return `⏱ <b>Уровни:</b> ${schedule.label.toLowerCase()} · <b>Анте:</b> ${structure.ante ? 'вкл' : 'выкл'}`;
+}
+
+function settingsPrompt(pending) {
+  const settings = tournamentSettings(pending);
+  const levels = computeBlindLevels(pending.chipSet, settings);
+  const rebuyRule = computeRebuySchedule(levels);
+  const last = lastRebuyLevel(rebuyRule);
+  const windowMinutes = levels.slice(0, last + 1).reduce((s, lv) => s + lv.minutes, 0);
+  const rebuyLine =
+    last >= 0
+      ? `💰 Re-entry открыт ${fmtHoursMinutes(windowMinutes)} — до конца уровня ${last + 1} (${blindsLabel(levels[last])}).`
+      : '';
+  const text =
+    `⏱ ${b('Настройки турнира')}\n\n` +
+    `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.\n\n` +
+    `${b('Анте')} — для быстрой игры: равно большому блайнду, платит его игрок на BB. Со 2-го уровня: первый уровень повторяется с теми же блайндами, но уже с анте.\n\n` +
+    rebuyLine;
+  // выбранный вариант — зелёным (style: 'success', как в рейтинге) и галочкой, если клиент стиль не рисует
+  const option = (selected, label, data) => {
+    const btn = Markup.button.callback(`${selected ? '✅ ' : ''}${label}`, data);
+    return selected ? { ...btn, style: 'success' } : btn;
+  };
+  return {
+    text,
+    keyboard: kb([
+      [
+        option(settings.schedule === 'flat', LEVEL_SCHEDULES.flat.label, 'ng:sched:flat'),
+        option(settings.schedule === 'turbo', LEVEL_SCHEDULES.turbo.label, 'ng:sched:turbo')
+      ],
+      [option(!settings.ante, 'Без анте', 'ng:ante:0'), option(settings.ante, 'С анте', 'ng:ante:1')],
+      [Markup.button.callback('▶️ Начать турнир', 'ng:start')],
+      [Markup.button.callback('❌ Отмена', 'ng:cancel')]
+    ])
+  };
+}
+
+function showSettingsPrompt(ctx, pending) {
+  const p = settingsPrompt(pending);
+  // "message is not modified" — нажали уже выбранный вариант, это не ошибка
+  return ctx.editMessageText(p.text, p.keyboard).catch(() => {});
 }
 
 bot.action('ng:done', async ctx => {
@@ -1474,26 +1528,28 @@ bot.action('ng:done', async ctx => {
     return ctx.answerCbQuery(`Нужно от 4 до ${MAX_PLAYERS} игроков`, { show_alert: true });
   }
   ctx.answerCbQuery();
-
-  if (!pending.tempo) {
-    const N = pending.selected.size;
-    const byTempo = stacksByTempo(pending.chipSet, pending.buyIn || 0, N);
-    const options = tempoOptions(byTempo, pending.chipSet, N);
-    if (options.length > 1) {
-      return showRichPanelInline(ctx, tempoPromptHtml(byTempo, pending.buyIn || 0, pending.chipSet, N, options), [
-        options.map(t => Markup.button.callback(TEMPO_PRESETS[t].label, `ng:tempo:${t}`)),
-        [Markup.button.callback('❌ Отмена', 'ng:cancel')]
-      ]);
-    }
-    pending.tempo = 'normal';
-  }
-  await evaluateAndProceed(ctx, pending);
+  await showSettingsPrompt(ctx, pending);
 });
 
-bot.action(/^ng:tempo:(slow|normal|fast)$/, async ctx => {
+bot.action(/^ng:sched:(flat|turbo)$/, async ctx => {
   const pending = pendingNewGame.get(ctx.from.id);
   if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
-  pending.tempo = ctx.match[1];
+  pending.schedule = ctx.match[1];
+  ctx.answerCbQuery();
+  await showSettingsPrompt(ctx, pending);
+});
+
+bot.action(/^ng:ante:(0|1)$/, async ctx => {
+  const pending = pendingNewGame.get(ctx.from.id);
+  if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
+  pending.ante = ctx.match[1] === '1';
+  ctx.answerCbQuery();
+  await showSettingsPrompt(ctx, pending);
+});
+
+bot.action('ng:start', async ctx => {
+  const pending = pendingNewGame.get(ctx.from.id);
+  if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
   ctx.answerCbQuery();
   await evaluateAndProceed(ctx, pending);
 });
@@ -1535,7 +1591,7 @@ function blindLevelLine(state) {
   const stacks = hasStructure ? maxRebuyStacksNow(state) : null;
   const reserveLine =
     stacks == null ? '' : stacks === 0 ? ' · <b>Re-entry недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
-  return `<p>🟢 <b>Блайнды:</b> ${lv.sb}/${lv.bb} (уровень ${idx + 1}/${levels.length})${reserveLine}</p>`;
+  return `<p>🟢 <b>Блайнды:</b> ${blindsLabel(lv)} (уровень ${idx + 1}/${levels.length})${reserveLine}</p>`;
 }
 
 // отдельной строкой внизу — там, где нет полной строки блайндов (стартовое сообщение турнира,
@@ -1598,12 +1654,188 @@ bot.hears(BTN_NEXT_LEVEL, ctx => {
     return showRichPanel(ctx, `<p>Следующего уровня нет.</p>` + statusHtml(state), gameRows(state));
   }
   const levels = state.structure.levels;
+  // сколько оставалось у уровня, который пропускаем, — чтобы отмена вернула именно его
+  const prevRemainingMs = state.timer ? timerRemainingMs(state) : null;
   state.blindLevel = Math.min(levels.length - 1, (state.blindLevel || 0) + 1);
   const lv = levels[state.blindLevel];
-  state.log.push({ type: 'LEVEL', sb: lv.sb, bb: lv.bb, at: new Date().toISOString() });
+  if (state.timer) setTimerRemaining(state, levelDurationMs(state, state.blindLevel));
+  state.log.push({ type: 'LEVEL', sb: lv.sb, bb: lv.bb, ante: lv.ante, prevRemainingMs, at: new Date().toISOString() });
   setState(ownerId, state);
-  showRichPanel(ctx, `<p>▶️ <b>Новый уровень:</b> ${lv.sb}/${lv.bb}</p>` + statusHtml(state), gameRows(state));
+  refreshTimerMessage(ownerId);
+  showRichPanel(ctx, `<p>▶️ <b>Новый уровень:</b> ${blindsLabel(lv)}</p>` + statusHtml(state), gameRows(state));
 });
+
+// ---------- таймер уровней ----------
+// Время хранится как момент окончания уровня (levelEndsAt), а не как счётчик — так таймер переживает
+// перезапуск бота: после старта он сам догоняет уровень, который должен идти сейчас. На паузе вместо
+// момента окончания хранится остаток (pausedRemainingMs). Сам таймер — закреплённое сообщение в чате
+// организатора, которое бот редактирует раз в TIMER_TICK_MS, а не шлёт заново
+
+const TIMER_TICK_MS = 5000;
+
+function isTimerPaused(state) {
+  return Boolean(state.timer && state.timer.pausedRemainingMs != null);
+}
+
+function levelDurationMs(state, idx) {
+  return state.structure.levels[idx].minutes * 60000;
+}
+
+function timerRemainingMs(state, now = Date.now()) {
+  return Math.max(0, isTimerPaused(state) ? state.timer.pausedRemainingMs : state.timer.levelEndsAt - now);
+}
+
+function setTimerRemaining(state, remainingMs) {
+  if (isTimerPaused(state)) state.timer.pausedRemainingMs = remainingMs;
+  else state.timer.levelEndsAt = Date.now() + remainingMs;
+}
+
+// "12:30" / "1:12:25"
+function fmtCountdown(ms) {
+  const total = Math.ceil(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const pad = n => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(total % 60)}` : `${m}:${pad(total % 60)}`;
+}
+
+// ⏱ Ур. 5 · 12:30 · 50/100/100 · далее 75/150/150 · ⚠️ до закрытия re-entry 1:12:25
+// когда re-entry закрыт, его часть просто пропадает — это и так видно по пропавшей кнопке
+function timerText(state, now = Date.now()) {
+  const { levels, rebuyRule } = state.structure;
+  const idx = state.blindLevel || 0;
+  const icon = isTimerPaused(state) ? '⏸' : '⏱';
+  if (!hasNextLevel(state)) return `${icon} Ур. ${idx + 1} · ${blindsLabel(levels[idx])} · последний уровень`;
+  const remaining = timerRemainingMs(state, now);
+  const parts = [`${icon} Ур. ${idx + 1}`, fmtCountdown(remaining), blindsLabel(levels[idx]), `далее ${blindsLabel(levels[idx + 1])}`];
+  const last = lastRebuyLevel(rebuyRule);
+  if (state.rebuysAllowed !== false && idx <= last) {
+    const laterMs = levels.slice(idx + 1, last + 1).reduce((s, lv) => s + lv.minutes * 60000, 0);
+    parts.push(`⚠️ до закрытия re-entry ${fmtCountdown(remaining + laterMs)}`);
+  }
+  return parts.join(' · ');
+}
+
+// обновить закреп (или отправить и закрепить заново, если его ещё нет или его удалили руками).
+// Вызовы по одному столу идут строго по очереди — иначе тик и старт игры могли бы одновременно
+// не найти закреп и отправить два
+const timerRefreshQueue = new Map(); // ownerId -> Promise
+
+function refreshTimerMessage(ownerId) {
+  const next = (timerRefreshQueue.get(ownerId) || Promise.resolve())
+    .then(() => doRefreshTimerMessage(ownerId))
+    .catch(err => console.error('Timer refresh failed:', err.message));
+  timerRefreshQueue.set(ownerId, next);
+  return next;
+}
+
+async function doRefreshTimerMessage(ownerId) {
+  const state = getState(ownerId);
+  if (!state || !state.timer) return;
+  const chatId = state.adminChatId;
+  const text = timerText(state);
+  if (state.timer.messageId) {
+    try {
+      await bot.telegram.editMessageText(chatId, state.timer.messageId, undefined, text);
+      return;
+    } catch (err) {
+      if (/not modified/.test(err.message)) return;
+      if (!/not found|can't be edited/.test(err.message)) throw err;
+      // закреп удалили — отправляем заново
+    }
+  }
+  const sent = await bot.telegram.sendMessage(chatId, text, { disable_notification: true });
+  await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(() => {});
+  const fresh = getState(ownerId);
+  if (fresh && fresh.timer) {
+    fresh.timer.messageId = sent.message_id;
+    setState(ownerId, fresh);
+  } else {
+    await bot.telegram.deleteMessage(chatId, sent.message_id).catch(() => {}); // игра успела закончиться
+  }
+}
+
+// при завершении/отмене игры закреп больше не нужен
+async function removeTimerMessage(state) {
+  if (!state.timer || !state.timer.messageId) return;
+  await bot.telegram.unpinChatMessage(state.adminChatId, state.timer.messageId).catch(() => {});
+  await bot.telegram.deleteMessage(state.adminChatId, state.timer.messageId).catch(() => {});
+}
+
+// переводит стол на уровень, который должен идти сейчас (после перезапуска бота — сразу на
+// несколько). Синхронно: между чтением и записью состояния нет await, иначе можно затереть
+// действие организатора, пришедшее в этот момент
+function advanceLevelsByTimer(ownerId) {
+  const state = getState(ownerId);
+  if (!state || !state.timer || isTimerPaused(state)) return false;
+  const now = Date.now();
+  let advanced = false;
+  while (hasNextLevel(state) && state.timer.levelEndsAt <= now) {
+    const endedAt = state.timer.levelEndsAt;
+    state.blindLevel = (state.blindLevel || 0) + 1;
+    // от момента окончания, а не от "сейчас" — тик может опоздать, расписание от этого не плывёт
+    state.timer.levelEndsAt = endedAt + levelDurationMs(state, state.blindLevel);
+    const lv = state.structure.levels[state.blindLevel];
+    state.log.push({ type: 'LEVEL', sb: lv.sb, bb: lv.bb, ante: lv.ante, prevRemainingMs: 0, at: new Date(endedAt).toISOString() });
+    advanced = true;
+  }
+  if (advanced) setState(ownerId, state);
+  return advanced;
+}
+
+// смена уровня по таймеру — как нажатие "Следующий уровень": новая панель стола. Новое сообщение
+// приходит со звуком, а его клавиатура актуальна (кнопка re-entry пропадает, когда он закрылся)
+async function announceLevelUp(ownerId) {
+  const state = getState(ownerId);
+  if (!state) return;
+  const lv = state.structure.levels[state.blindLevel];
+  const chatId = state.adminChatId;
+  await clearLiveMessagesIn(chatId);
+  const html = `<p>🔔 <b>Новый уровень ${state.blindLevel + 1}:</b> ${blindsLabel(lv)}</p>` + statusHtml(state);
+  trackLiveMessageIn(chatId, await sendRich(chatId, html, gameRows(state)));
+}
+
+let timerTickRunning = false;
+
+async function timerTick() {
+  if (timerTickRunning) return; // прошлый тик ещё не закончил (медленный Telegram) — не наслаиваем
+  timerTickRunning = true;
+  try {
+    for (const { ownerId } of getActiveGames()) {
+      const leveledUp = advanceLevelsByTimer(ownerId);
+      await refreshTimerMessage(ownerId);
+      if (leveledUp) await announceLevelUp(ownerId).catch(err => console.error('Level-up notice failed:', err.message));
+    }
+  } finally {
+    timerTickRunning = false;
+  }
+}
+
+// unref — как и у таймера заявок ниже: не держит процесс живым при остановке
+setInterval(() => {
+  timerTick().catch(err => console.error('Timer tick failed:', err.message));
+}, TIMER_TICK_MS).unref();
+
+function setTimerPaused(ctx, paused) {
+  const ownerId = gameOwnerId(ctx);
+  const state = getState(ownerId);
+  if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
+  if (state.timer && paused !== isTimerPaused(state)) {
+    if (paused) {
+      state.timer.pausedRemainingMs = timerRemainingMs(state);
+    } else {
+      state.timer.levelEndsAt = Date.now() + state.timer.pausedRemainingMs;
+      state.timer.pausedRemainingMs = null;
+    }
+    setState(ownerId, state);
+    refreshTimerMessage(ownerId);
+  }
+  const note = paused ? '⏸ <b>Таймер на паузе</b>' : '⏯ <b>Таймер снова идёт</b>';
+  showRichPanel(ctx, `<p>${note}</p>` + statusHtml(state), gameRows(state));
+}
+
+bot.hears(BTN_PAUSE, ctx => setTimerPaused(ctx, true));
+bot.hears(BTN_RESUME, ctx => setTimerPaused(ctx, false));
 
 function cancelLastEvent(ownerId, state) {
   const last = state.log.pop();
@@ -1617,6 +1849,11 @@ function cancelLastEvent(ownerId, state) {
     if (last.by) state.knockouts[last.by]--;
   } else if (last.type === 'LEVEL') {
     state.blindLevel = Math.max(0, (state.blindLevel || 0) - 1);
+    // таймер возвращается к остатку, который был у уровня в момент смены; если уровень сменился
+    // сам по таймеру (остатка уже не было) — возвращённый уровень идёт заново целиком
+    if (state.timer) {
+      setTimerRemaining(state, last.prevRemainingMs > 0 ? last.prevRemainingMs : levelDurationMs(state, state.blindLevel));
+    }
   } else if (last.type === 'JOIN') {
     delete state.players[last.id];
     delete state.rebuys[last.id];
@@ -1633,6 +1870,7 @@ bot.hears(BTN_CANCEL, ctx => {
   if (!cancelLastEvent(ownerId, state)) {
     return showRichPanel(ctx, `<p>Нечего отменять.</p>` + statusHtml(state), gameRows(state));
   }
+  refreshTimerMessage(ownerId); // отменили смену уровня или re-entry — закреп должен это показать сразу
   showRichPanel(ctx, `<p>↩️ <b>Последнее событие отменено</b></p>` + statusHtml(state), gameRows(state));
 });
 
@@ -1651,7 +1889,9 @@ bot.hears(BTN_REBUY, ctx => {
   const state = getState(gameOwnerId(ctx));
   if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
   if (!canRebuyNow(state)) {
-    return showPanel(ctx, '🚫 Re-entry недоступны — в наборе не хватает фишек на ещё один стек.', replyKb(gameRows(state)));
+    const closedBySchedule = state.structure && state.structure.rebuyRule && state.structure.rebuyRule[state.blindLevel || 0] === REBUY_CLOSED;
+    const reason = closedBySchedule ? 'Re-entry закрыт — время на него вышло.' : 'Re-entry недоступны — в наборе не хватает фишек на ещё один стек.';
+    return showPanel(ctx, `🚫 ${reason}`, replyKb(gameRows(state)));
   }
   const maxRebuys = maxRebuysConfigured(state);
   const candidates = state.busted.filter(id => state.rebuys[id] < maxRebuys);
@@ -1669,7 +1909,7 @@ bot.action(/^rebuy:(\d+)$/, ctx => {
   const ownerId = gameOwnerId(ctx);
   const state = getState(ownerId);
   if (!state) return ctx.answerCbQuery('Нет активной игры');
-  if (!canRebuyNow(state)) return ctx.answerCbQuery('Re-entry недоступны — фишек не хватит');
+  if (!canRebuyNow(state)) return ctx.answerCbQuery('Re-entry сейчас недоступен');
   const id = ctx.match[1];
   if (!state.players[id]) return ctx.answerCbQuery('Игрок не найден');
   const bustedIndex = state.busted.indexOf(id);
@@ -1846,6 +2086,7 @@ async function finalizeGame(ctx, state, ownerId) {
 
   state.endedAt = new Date().toISOString();
   clearState(ownerId); // стол освобождён — новую игру можно начинать не дожидаясь подтверждения этой
+  await removeTimerMessage(state);
   if (actingOwner.get(ctx.from.id) === ownerId) actingOwner.delete(ctx.from.id);
 
   if (isAdmin(ctx)) {
@@ -1968,6 +2209,7 @@ bot.action(/^eg:earlyEndConfirm:(\d+)$/, async ctx => {
   const state = getState(ownerId);
   if (!state) return ctx.answerCbQuery('Стол уже закрыт');
   clearState(ownerId);
+  await removeTimerMessage(state);
   if (actingOwner.get(ctx.from.id) === ownerId) actingOwner.delete(ctx.from.id);
   ctx.answerCbQuery('Турнир прерван');
   await showPanel(ctx, '🗑 Турнир прерван досрочно — данные не сохранены.', replyKb(menuRows(ctx)));
@@ -2536,7 +2778,7 @@ function eventsLogHtml(events, startedAt, nameById, maxRebuys) {
       if (e.type === 'BUST') {
         text = e.by ? `☠️ ${nameOf(e.by)} выбивает ${nameOf(e.id)}` : `☠️ ${nameOf(e.id)} выбывает — без явного knockout`;
       } else if (e.type === 'LEVEL') {
-        text = `🟢 Новый уровень блайндов: ${e.sb}/${e.bb}`;
+        text = `🟢 Новый уровень блайндов: ${blindsLabel(e)}`;
       } else if (e.type === 'JOIN') {
         text = `🆕 ${nameOf(e.id)} присоединяется к турниру`;
       } else {

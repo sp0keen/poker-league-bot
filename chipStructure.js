@@ -210,99 +210,138 @@ function computeTargetStack(denoms, N, targetValue, reserveFactor = RESERVE_FACT
   return fillStack(denoms, N, targetValue, 1, false);
 }
 
-// блайнды — свойство набора фишек, а не стека: по одному уровню на каждый номинал (SB = сам
-// номинал), затем уровень на удвоенный старший номинал, затем уровни на номиналы, вернувшиеся
-// в игру ×100 (см. computeDenomSchedule) — тот же порядок, что и их возврат в оборот.
-// Для эталонного набора 5/10/25/50/100 даёт ровно 5/10, 10/20, 25/50, 50/100, 100/200, 200/400,
-// 500/1000 — как в исходной ручной раскладке.
-// наименьший множитель вида 10^k (10, 100, 1000, ...), при котором value×множитель не меньше
-// floor. Раньше возврат номинала в игру был жёстко ×100, но если естественное удвоение уже
-// обогнало эту сотню (например, младший номинал 1 при якоре 100), фишка возвращалась каким-то
-// некруглым числом вроде 400 — вместо этого сразу перескакиваем на следующий круглый разряд (1000)
-function nicePromotionMultiplier(value, floor) {
-  let mult = 10;
-  while (value * mult < floor) mult *= 10;
-  return mult;
-}
+// ---------- блайнды (игра по времени) ----------
 
-// сколько уровней номинал сидит "мёртвым" после ухода из оборота, прежде чем вернуться
-// повышенным — фиксированное число, а не растущее с количеством номиналов (см. комментарий
-// у activeDenomsAtLevel про то, почему это важно)
-const PROMOTE_GAP = 2;
+// эталонная сетка малых блайндов для набора 5/10/25/50/100 (BB = 2×SB) — подобрана руками, как и
+// REFERENCE_STACK: рост ×1.25–2 за уровень (а не удвоение), и каждый блайнд ставится одной-двумя
+// фишками. 20/40 пропущен намеренно — ставить удобно, но между 15/30 и 25/50 он почти ничего не
+// меняет. Пятёрки нужны до 15/30 включительно, поэтому до 25/50 их не разменивают
+const REFERENCE_SB_LADDER = [5, 10, 15, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000];
 
-// насколько сильно блайнд имеет право скакнуть за один уровень, когда ему подбирают "круглое"
-// переобозначение (см. ниже) — 2.5 подобрано так, чтобы пропускать привычный скачок на
-// эталонном наборе 5/10/25/50/100 (200 -> 500, это и есть ×2.5) и при этом отсекать скачки в
-// 4-10 раз, которые случаются на наборах с меньшим числом номиналов (см. историю ниже)
-const MAX_LEVEL_JUMP_RATIO = 2.5;
+// "круглые" мантиссы для своего набора фишек — блайнд всегда вида m×10^k
+const NICE_MANTISSAS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7.5, 8];
+const MIN_LEVEL_GROWTH = 1.25;
+// сетка тянется до SB = 600× младший номинал (на эталонном наборе это 3000/6000) — с запасом,
+// чтобы турнир при любом составе доигрывался раньше, чем она кончится
+const LADDER_SPAN = 600;
 
-function computeBlindLevels(denoms) {
-  const d = [...denoms].map(x => x.value).sort((a, b) => a - b);
-  const k = d.length;
-  // нужно достаточно уровней, чтобы САМЫЙ последний уходящий номинал (j = k-2) успел не только
-  // уйти (на уровне j+2), но и вернуться (ещё через PROMOTE_GAP уровней) — иначе он проведёт
-  // остаток таблицы (а с ним и любую реальную игру) без единого шанса снова стать разменным
-  const maxLevels = Math.min(k + PROMOTE_GAP + 1, 12);
-  const levels = [];
-  let sb = 0;
-  for (let i = 0; i < maxLevels; i++) {
-    if (i < k) sb = d[i];
-    else if (i === k) sb = 2 * d[k - 1];
-    else {
-      // предпочитаем "круглое" переобозначение вернувшегося номинала (степень десяти — как
-      // выглядит на столе физическая фишка), но не даём ему скакнуть больше чем в
-      // MAX_LEVEL_JUMP_RATIO раз за один уровень. На стандартном наборе это даёт привычные
-      // круглые 500/1000/2000; на наборах с меньшим числом номиналов, где круглое
-      // переобозначение подскочило бы в 4-10 раз за уровень, вместо этого просто удваиваем —
-      // никакой физический номинал в это переобозначение не обязан попадать день в день,
-      // activeDenomsAtLevel пересчитывает его отдельно под фактический результат этой сетки
-      const j = i - k - 1;
-      const floor = 2 * sb;
-      const promoted = d[j] * nicePromotionMultiplier(d[j], floor);
-      sb = promoted <= sb * MAX_LEVEL_JUMP_RATIO ? promoted : sb * 2;
+function nextNiceMultiple(min, step) {
+  for (let exp = Math.floor(Math.log10(min)) - 1; ; exp++) {
+    for (const m of NICE_MANTISSAS) {
+      const v = Math.round(m * 10 ** exp * 1000) / 1000;
+      if (v >= min && Number.isInteger(v / step)) return v;
     }
-    levels.push({ sb, bb: sb * 2 });
   }
-  return levels;
 }
 
-// докупки: первая треть уровней — до 2 стеков, средняя треть — 1 стек, последняя — запрещены
+// свой набор: от младшего номинала вверх, каждый следующий SB — ближайшее круглое число не меньше
+// ×1.25 от предыдущего, кратное младшему номиналу (иначе его физически нечем поставить)
+function generateSbLadder(d) {
+  const ladder = [d[0]];
+  while (ladder[ladder.length - 1] < d[0] * LADDER_SPAN) {
+    ladder.push(nextNiceMultiple(ladder[ladder.length - 1] * MIN_LEVEL_GROWTH, d[0]));
+  }
+  return ladder;
+}
+
+// длина уровня: ровные — всегда 20 мин; с ускорением — ур. 1–4 по 20, 5–8 по 15, дальше по 12
+const LEVEL_SCHEDULES = {
+  flat: { label: 'Ровные 20 мин', minutes: () => 20 },
+  turbo: { label: 'С ускорением', minutes: i => (i < 4 ? 20 : i < 8 ? 15 : 12) }
+};
+
+// { ante, schedule } — настройки турнира. Анте = большой блайнд, платит его игрок на BB (BB ante).
+// С анте первый уровень повторяется дважды: сначала без анте, потом те же блайнды с анте, а дальше
+// анте на всех уровнях — как в офлайн-структуре. Без анте этого повтора нет
+function computeBlindLevels(denoms, { ante = false, schedule = 'flat' } = {}) {
+  const d = [...denoms].map(x => x.value).sort((a, b) => a - b);
+  const sbs = isReferenceChipset(denoms) ? REFERENCE_SB_LADDER : generateSbLadder(d);
+  let levels = sbs.map(sb => ({ sb, bb: sb * 2, ante: 0 }));
+  if (ante) levels = [levels[0], ...levels.map(lv => ({ ...lv, ante: lv.bb }))];
+  const minutes = (LEVEL_SCHEDULES[schedule] || LEVEL_SCHEDULES.flat).minutes;
+  return levels.map((lv, i) => ({ ...lv, minutes: minutes(i) }));
+}
+
+// "50/100" или "50/100/100" с анте
+function blindsLabel(lv) {
+  return lv.ante ? `${lv.sb}/${lv.bb}/${lv.ante}` : `${lv.sb}/${lv.bb}`;
+}
+
+// re-entry открыт, пока BB не больше 30 стартовых BB (на эталонном наборе — до конца 150/300):
+// дальше стек re-entry — это 3 BB и меньше, докупка на пару раздач. Не запрещаем её раньше
+// намеренно: кто хочет рискнуть на короткий стек — пусть рискует
+const REBUY_CLOSE_BB_MULT = 30;
+const REBUY_OPEN = '✅ Открыт';
+const REBUY_CLOSED = '❌ Запрещены';
+
 function computeRebuySchedule(levels) {
-  const n = levels.length;
-  return levels.map((_, i) => {
-    if (i < Math.ceil(n / 3)) return 'До 2 стеков';
-    if (i < Math.ceil((2 * n) / 3)) return 'Только 1 стек';
-    return '❌ Запрещены';
+  const limit = levels[0].bb * REBUY_CLOSE_BB_MULT;
+  return levels.map(lv => (lv.bb <= limit ? REBUY_OPEN : REBUY_CLOSED));
+}
+
+// можно ли набрать amount фишками номиналов values (без ограничения по количеству). Свой набор
+// может быть с дробными номиналами (0.5) — считаем в сотых долях
+function representable(amount, values) {
+  const toInt = x => Math.round(x * 100);
+  const target = toInt(amount);
+  const coins = values.map(toInt);
+  const can = new Uint8Array(target + 1);
+  can[0] = 1;
+  for (let v = 1; v <= target; v++) {
+    can[v] = coins.some(x => x <= v && can[v - x]) ? 1 : 0;
+  }
+  return can[target] === 1;
+}
+
+// когда номинал уходит из игры и когда возвращается повышенным. Уходит — с первого уровня, после
+// которого он больше ни разу не нужен: любой блайнд/анте этого и всех следующих уровней набирается
+// более крупными номиналами (стандартное правило разменов в турнирах — фишку убирают, когда она не
+// нужна для блайндов). Возвращается — как ×100 (или ×1000, если ×100 занято/не крупнее старшего
+// номинала) с первого уровня, где BB дорос до её новой ценности. Старший номинал — якорь, всегда в игре
+// activeDenomsAtLevel зовётся в циклах подсчёта резерва re-entry (на каждый уровень, на каждую
+// пробную докупку) — сам расчёт не дешёвый, а входные данные у одной игры всегда одни и те же
+const lifecycleCache = new Map();
+
+function denomLifecycle(d, levels) {
+  const key = JSON.stringify([d, levels.map(lv => [lv.sb, lv.bb, lv.ante || 0])]);
+  if (!lifecycleCache.has(key)) lifecycleCache.set(key, computeDenomLifecycle(d, levels));
+  return lifecycleCache.get(key);
+}
+
+function computeDenomLifecycle(d, levels) {
+  const k = d.length;
+  const largest = d[k - 1];
+  const amountsAt = lv => [lv.sb, lv.bb, lv.ante].filter(a => a > 0);
+  const usedPromoted = new Set(d);
+  return d.map((value, j) => {
+    if (j === k - 1) return { value, retireAt: Infinity };
+    const larger = d.slice(j + 1);
+    let lastNeeded = -1;
+    levels.forEach((lv, i) => {
+      if (amountsAt(lv).some(a => !representable(a, larger))) lastNeeded = i;
+    });
+    // пока номинал не меньше SB, он и так в ходу — раньше этого не убираем даже "ненужный"
+    const firstBelowSb = levels.findIndex(lv => lv.sb > value);
+    const retireAt = Math.max(lastNeeded + 1, firstBelowSb === -1 ? Infinity : firstBelowSb);
+    if (retireAt >= levels.length) return { value, retireAt: Infinity };
+    let promotedValue = value * 100;
+    while (promotedValue <= largest || usedPromoted.has(promotedValue)) promotedValue *= 10;
+    usedPromoted.add(promotedValue);
+    const returnIdx = levels.findIndex((lv, i) => i > retireAt && lv.bb >= promotedValue);
+    return { value, retireAt, promoteAt: returnIdx === -1 ? Infinity : returnIdx, promotedValue };
   });
 }
 
-// структурная версия: какие номиналы в игре на уровне i, каждый — {value, effectiveValue}, где
-// value — печатный номинал (по нему считается физический остаток фишек в наборе), effectiveValue
-// — принимаемая сейчас ценность (совпадает с value, пока номинал не был выведён и возвращён с
-// повышенным значением). Старший номинал — якорь, всегда в игре. Остальные — каждый уходит из
-// игры через 2 уровня после своего собственного (стал слишком мелким для блайндов) и
-// возвращается через PROMOTE_GAP уровней после ухода — фиксированный промежуток, ОДИНАКОВЫЙ
-// независимо от того, сколько всего номиналов в наборе. Раньше промежуток растягивался вместе с
-// количеством номиналов (k+j), из-за чего в наборах от 4 штук младшие номиналы либо возвращались
-// только в самом конце очень длинной таблицы, либо вообще не успевали получить слот для возврата
-// в пределах таблицы — по факту уходили навсегда, даже в теоретически бесконечно долгой игре
+// какие номиналы в игре на уровне i, каждый — {value, effectiveValue}: value — печатный номинал
+// (по нему считается физический остаток фишек в наборе), effectiveValue — принимаемая сейчас
+// ценность (совпадает с value, пока номинал не был выведен и возвращён с повышенным значением)
 function activeDenomsAtLevel(denoms, levels, i) {
   const d = [...denoms].map(x => x.value).sort((a, b) => a - b);
-  const k = d.length;
-  const active = [{ value: d[k - 1], effectiveValue: d[k - 1] }];
-  for (let j = 0; j < k - 1; j++) {
-    const retireAt = j + 2;
-    const promoteAt = retireAt + PROMOTE_GAP;
-    if (i < retireAt) {
-      active.push({ value: d[j], effectiveValue: d[j] });
-    } else if (i >= promoteAt) {
-      // считаем ценность на возврате от блайнда ПРЕДЫДУЩЕГО уровня (не последнего уровня всей
-      // таблицы) — номинал должен быть достаточно крупным именно для того момента, когда он
-      // реально возвращается в игру
-      const promotedValue = d[j] * nicePromotionMultiplier(d[j], 2 * levels[i - 1].sb);
-      active.push({ value: d[j], effectiveValue: promotedValue });
-    }
-  }
+  const active = [];
+  denomLifecycle(d, levels).forEach(c => {
+    if (i < c.retireAt) active.push({ value: c.value, effectiveValue: c.value });
+    else if (i >= c.promoteAt) active.push({ value: c.value, effectiveValue: c.promotedValue });
+  });
   return active.sort((a, b) => a.value - b.value);
 }
 
@@ -351,10 +390,12 @@ function parseChipSet(text) {
 
 module.exports = {
   STANDARD_CHIPSET,
-  TEMPO_PRESETS,
   computeStandardStack,
   computeTargetStack,
   computeBlindLevels,
+  blindsLabel,
+  LEVEL_SCHEDULES,
+  REBUY_CLOSED,
   computeRebuySchedule,
   computeDenomSchedule,
   activeDenomsAtLevel,
