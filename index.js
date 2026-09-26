@@ -2449,46 +2449,61 @@ bot.action(/^pdc:(\d+)$/, ctx => {
 
 const HISTORY_PAGE_SIZE = 10;
 
-function showHistoryPage(ctx, page) {
+// ref страницы истории в callback_data: scope + номер страницы, например "m0" (только мои) или "a3" (все);
+// тащится через протокол и редактор игры, чтобы «назад» возвращал в тот же список
+const HIST_REF = '[am]\\d+';
+
+function showHistoryPage(ctx, ref) {
   const telegramId = ctx.from.id;
   const p = getPlayerByTelegramId(telegramId);
   if (!p) return showPanel(ctx, 'Ты ещё не зарегистрирован — напиши /start', replyKb(menuRows(ctx)));
 
   const admin = canOrganize(ctx);
-  const total = admin ? getAllGamesCount() : getPlayerGamesCount(telegramId);
-  if (!total) return showPanel(ctx, 'Пока нет сыгранных турниров.', replyKb(menuRows(ctx)));
+  // по умолчанию организатор видит все турниры, игрок — только свои
+  const scope = ref ? ref[0] : admin ? 'a' : 'm';
+  const page = ref ? Number(ref.slice(1)) : 0;
+  const all = scope === 'a';
 
-  const games = admin
+  const total = all ? getAllGamesCount() : getPlayerGamesCount(telegramId);
+  const games = all
     ? getAllGamesPage(page * HISTORY_PAGE_SIZE, HISTORY_PAGE_SIZE)
     : getPlayerGamesPage(telegramId, page * HISTORY_PAGE_SIZE, HISTORY_PAGE_SIZE);
 
-  const html = admin
-    ? `<h2>📜 Все турниры</h2><p>Всего: ${total}. Нажми на игру, чтобы посмотреть и отредактировать протокол.</p>`
-    : `<h2>📜 История: ${esc(p.display_name)}</h2><p>Всего турниров: ${total}. Нажми на игру, чтобы посмотреть протокол.</p>`;
+  const hint = admin ? 'Нажми на игру, чтобы посмотреть и отредактировать протокол.' : 'Нажми на игру, чтобы посмотреть протокол.';
+  const html = all
+    ? `<h2>📜 Все турниры</h2><p>${total ? `Всего: ${total}. ${hint}` : 'Пока нет сыгранных турниров.'}</p>`
+    : `<h2>📜 История: ${esc(p.display_name)}</h2><p>${total ? `Всего турниров: ${total}. ${hint}` : 'Ты пока не сыграл ни одного турнира.'}</p>`;
 
-  const rows = games.map(g => [
-    Markup.button.callback(
-      admin
-        ? `#${g.game_no} · ${fmtDate(g.date)} · ${g.num_players} игроков${g.buy_in ? ' · 💵' : ''}`
-        : `#${g.game_no} · ${fmtDate(g.date)} · место ${g.place} · ${g.total_points} очк.`,
-      `hist:game:${g.game_id}:${page}`
-    )
-  ]);
+  const rows = [[
+    Markup.button.callback(`${all ? '✅ ' : ''}Все турниры`, 'hist:page:a0'),
+    Markup.button.callback(`${all ? '' : '✅ '}Только мои`, 'hist:page:m0')
+  ]];
+  const curRef = `${scope}${page}`;
+  for (const g of games) {
+    rows.push([
+      Markup.button.callback(
+        all
+          ? `#${g.game_no} · ${fmtDate(g.date)} · ${g.num_players} игроков${g.buy_in ? ' · 💵' : ''}`
+          : `#${g.game_no} · ${fmtDate(g.date)} · место ${g.place} · ${g.total_points} очк.`,
+        `hist:game:${g.game_id}:${curRef}`
+      )
+    ]);
+  }
   const nav = [];
-  if (page > 0) nav.push(Markup.button.callback('◀️ Пред.', `hist:page:${page - 1}`));
-  if ((page + 1) * HISTORY_PAGE_SIZE < total) nav.push(Markup.button.callback('След. ▶️', `hist:page:${page + 1}`));
+  if (page > 0) nav.push(Markup.button.callback('◀️ Пред.', `hist:page:${scope}${page - 1}`));
+  if ((page + 1) * HISTORY_PAGE_SIZE < total) nav.push(Markup.button.callback('След. ▶️', `hist:page:${scope}${page + 1}`));
   if (nav.length) rows.push(nav);
   rows.push([Markup.button.callback('⬅️ Главное меню', 'hist:menu')]);
 
   showRichPanelInline(ctx, html, rows);
 }
 
-bot.command('history', ctx => showHistoryPage(ctx, 0));
-bot.hears(BTN_HISTORY, ctx => showHistoryPage(ctx, 0));
+bot.command('history', ctx => showHistoryPage(ctx));
+bot.hears(BTN_HISTORY, ctx => showHistoryPage(ctx));
 
-bot.action(/^hist:page:(\d+)$/, ctx => {
+bot.action(new RegExp(`^hist:page:(${HIST_REF})$`), ctx => {
   ctx.answerCbQuery();
-  showHistoryPage(ctx, Number(ctx.match[1]));
+  showHistoryPage(ctx, ctx.match[1]);
 });
 
 function showGameProtocol(ctx, gameId, page) {
@@ -2504,9 +2519,9 @@ function showGameProtocol(ctx, gameId, page) {
   showRichPanelInline(ctx, html, rows);
 }
 
-bot.action(/^hist:game:([0-9a-f-]+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^hist:game:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
   ctx.answerCbQuery();
-  showGameProtocol(ctx, ctx.match[1], Number(ctx.match[2]));
+  showGameProtocol(ctx, ctx.match[1], ctx.match[2]);
 });
 
 bot.action('hist:menu', ctx => {
@@ -2516,7 +2531,7 @@ bot.action('hist:menu', ctx => {
 
 // --- админ: удаление игры целиком ---
 
-bot.action(/^gd:([0-9a-f-]+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^gd:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   ctx.answerCbQuery();
   const [, gameId, page] = ctx.match;
@@ -2527,17 +2542,17 @@ bot.action(/^gd:([0-9a-f-]+):(\d+)$/, ctx => {
   );
 });
 
-bot.action(/^gdc:([0-9a-f-]+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^gdc:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   const [, gameId, pageStr] = ctx.match;
   deleteGame(gameId);
   ctx.answerCbQuery('Игра удалена');
-  showHistoryPage(ctx, Number(pageStr));
+  showHistoryPage(ctx, pageStr);
 });
 
 // --- админ: редактирование результата игрока в уже сохранённой игре ---
 
-bot.action(/^ge:([0-9a-f-]+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^ge:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   ctx.answerCbQuery();
   const [, gameId, page] = ctx.match;
@@ -2584,14 +2599,14 @@ function editorButtons(gameId, telegramId, page) {
   ];
 }
 
-bot.action(/^ep:([0-9a-f-]+):(\d+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^ep:([0-9a-f-]+):(\\d+):(${HIST_REF})$`), ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   ctx.answerCbQuery();
   const [, gameId, telegramIdStr, page] = ctx.match;
   showRichPanelInline(ctx, editorScreenHtml(gameId, Number(telegramIdStr)), editorButtons(gameId, telegramIdStr, page));
 });
 
-bot.action(/^ea:([0-9a-f-]+):(\d+):([prk]):(-?\d+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^ea:([0-9a-f-]+):(\\d+):([prk]):(-?\\d+):(${HIST_REF})$`), ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   const [, gameId, telegramIdStr, field, deltaStr, page] = ctx.match;
   const telegramId = Number(telegramIdStr);
@@ -2612,9 +2627,9 @@ bot.action(/^ea:([0-9a-f-]+):(\d+):([prk]):(-?\d+):(\d+)$/, ctx => {
   showRichPanelInline(ctx, editorScreenHtml(gameId, telegramId), editorButtons(gameId, telegramId, page));
 });
 
-bot.action(/^ed:([0-9a-f-]+):(\d+)$/, ctx => {
+bot.action(new RegExp(`^ed:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
   ctx.answerCbQuery();
-  showGameProtocol(ctx, ctx.match[1], Number(ctx.match[2]));
+  showGameProtocol(ctx, ctx.match[1], ctx.match[2]);
 });
 
 // ---------- бэкап и восстановление (только владелец) ----------
