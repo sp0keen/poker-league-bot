@@ -543,6 +543,7 @@ bot.hears(BTN_ACTIVE_GAMES, async ctx => {
     if (games.length === 1) {
       const only = games[0];
       if (only.ownerId === ctx.from.id) return showRichPanel(ctx, statusHtml(only.state), gameRows(only.state));
+      addTimerWatcher(only.ownerId, ctx.chat.id);
       return showRichPanelInline(ctx, statusHtml(only.state), [
         [{ text: '📋 Правила турнира', callback_data: `ag:rules:${only.ownerId}` }],
         [{ text: '⬅️ Главное меню', callback_data: 'hist:menu' }]
@@ -596,6 +597,7 @@ bot.action(/^ag:view:(\d+)$/, ctx => {
   const state = getState(ownerId);
   ctx.answerCbQuery();
   if (!state) return showPanel(ctx, 'Этот стол уже закрыт.', replyKb(menuRows(ctx)));
+  addTimerWatcher(ownerId, ctx.chat.id);
   showRichPanelInline(ctx, statusHtml(state), [
     [{ text: '📋 Правила турнира', callback_data: `ag:rules:${ownerId}` }],
     [{ text: '⬅️ Главное меню', callback_data: 'hist:menu' }]
@@ -621,6 +623,7 @@ bot.action(/^ag:enter:(\d+)$/, ctx => {
   ctx.answerCbQuery();
   if (!state) return showPanel(ctx, 'Этот стол уже закрыт.', replyKb(menuRows(ctx)));
   actingOwner.set(ctx.from.id, ownerId);
+  addTimerWatcher(ownerId, ctx.chat.id);
   showRichPanel(ctx, statusHtml(state), gameRows(state));
 });
 
@@ -1446,7 +1449,7 @@ async function createGame(ctx, pending) {
       originalN: N
     },
     // таймер уровня стартует вместе с игрой (см. "таймер уровней")
-    timer: { levelEndsAt: Date.now() + levels[0].minutes * 60000, pausedRemainingMs: null, messageId: null },
+    timer: { levelEndsAt: Date.now() + levels[0].minutes * 60000, pausedRemainingMs: null, pins: {}, watchers: [] },
     players,
     rebuys: {},
     knockouts: {},
@@ -1683,7 +1686,7 @@ bot.hears(BTN_NEXT_LEVEL, ctx => {
 // Время хранится как момент окончания уровня (levelEndsAt), а не как счётчик — так таймер переживает
 // перезапуск бота: после старта он сам догоняет уровень, который должен идти сейчас. На паузе вместо
 // момента окончания хранится остаток (pausedRemainingMs). Сам таймер — закреплённое сообщение в чате
-// организатора, которое бот редактирует раз в TIMER_TICK_MS, а не шлёт заново
+// организатора, участников и зрителей (см. timerPins), которое бот редактирует раз в TIMER_TICK_MS, а не шлёт заново
 
 const TIMER_TICK_MS = 5000;
 
@@ -1743,37 +1746,87 @@ function refreshTimerMessage(ownerId) {
   return next;
 }
 
-async function doRefreshTimerMessage(ownerId) {
+// закреп с таймером висит не только у организатора: у каждого участника (в личке с ботом) и у
+// каждого, кто открыл стол через "🕹 Активные турниры" посмотреть. timer.pins — chatId -> message_id
+// закрепа в этом чате; 0 — туда не отправить (игрок заблокировал бота), больше не пытаемся.
+// Старые игры хранили один закреп организатора в timer.messageId
+function timerPins(state) {
+  const pins = { ...(state.timer.pins || {}) };
+  if (state.timer.messageId && pins[state.adminChatId] == null) pins[state.adminChatId] = state.timer.messageId;
+  return pins;
+}
+
+function timerChatIds(state) {
+  return [...new Set([state.adminChatId, ...Object.keys(state.players), ...(state.timer.watchers || [])].map(String))];
+}
+
+// зритель открыл чужой стол — ему тоже закреп с таймером
+function addTimerWatcher(ownerId, chatId) {
   const state = getState(ownerId);
   if (!state || !state.timer) return;
-  const chatId = state.adminChatId;
-  const text = timerText(state);
-  if (state.timer.messageId) {
+  if (!timerChatIds(state).includes(String(chatId))) {
+    state.timer.watchers = [...(state.timer.watchers || []), String(chatId)];
+    setState(ownerId, state);
+  }
+  refreshTimerMessage(ownerId);
+}
+
+// обновить закреп в одном чате; возвращает message_id (новый, если пришлось отправить заново)
+async function refreshTimerIn(chatId, messageId, text) {
+  if (messageId) {
     try {
-      await bot.telegram.editMessageText(chatId, state.timer.messageId, undefined, text);
-      return;
+      await bot.telegram.editMessageText(chatId, messageId, undefined, text);
+      return messageId;
     } catch (err) {
-      if (/not modified/.test(err.message)) return;
+      if (/not modified/.test(err.message)) return messageId;
       if (!/not found|can't be edited/.test(err.message)) throw err;
       // закреп удалили — отправляем заново
     }
   }
   const sent = await bot.telegram.sendMessage(chatId, text, { disable_notification: true });
   await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(() => {});
+  return sent.message_id;
+}
+
+async function doRefreshTimerMessage(ownerId) {
+  const state = getState(ownerId);
+  if (!state || !state.timer) return;
+  const text = timerText(state);
+  const pins = timerPins(state);
+  const changed = {};
+  for (const chatId of timerChatIds(state)) {
+    if (pins[chatId] === 0) continue;
+    try {
+      const id = await refreshTimerIn(chatId, pins[chatId], text);
+      if (id !== pins[chatId]) changed[chatId] = id;
+    } catch (err) {
+      // бот заблокирован / чата нет — у этого человека закрепа не будет, остальным это не мешает
+      if (/blocked|chat not found|deactivated|Forbidden/.test(err.message)) changed[chatId] = 0;
+      else console.error(`Timer refresh in ${chatId} failed:`, err.message);
+    }
+  }
+  if (!Object.keys(changed).length) return;
   const fresh = getState(ownerId);
   if (fresh && fresh.timer) {
-    fresh.timer.messageId = sent.message_id;
+    fresh.timer.pins = { ...timerPins(fresh), ...changed };
+    delete fresh.timer.messageId;
     setState(ownerId, fresh);
   } else {
-    await bot.telegram.deleteMessage(chatId, sent.message_id).catch(() => {}); // игра успела закончиться
+    // игра успела закончиться, пока отправляли
+    for (const [chatId, id] of Object.entries(changed)) {
+      if (id) await bot.telegram.deleteMessage(chatId, id).catch(() => {});
+    }
   }
 }
 
-// при завершении/отмене игры закреп больше не нужен
+// при завершении/отмене игры закреп больше не нужен — ни у кого
 async function removeTimerMessage(state) {
-  if (!state.timer || !state.timer.messageId) return;
-  await bot.telegram.unpinChatMessage(state.adminChatId, state.timer.messageId).catch(() => {});
-  await bot.telegram.deleteMessage(state.adminChatId, state.timer.messageId).catch(() => {});
+  if (!state.timer) return;
+  for (const [chatId, id] of Object.entries(timerPins(state))) {
+    if (!id) continue;
+    await bot.telegram.unpinChatMessage(chatId, id).catch(() => {});
+    await bot.telegram.deleteMessage(chatId, id).catch(() => {});
+  }
 }
 
 // переводит стол на уровень, который должен идти сейчас (после перезапуска бота — сразу на
