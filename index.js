@@ -1105,8 +1105,8 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
 // levelContext (если передан — {denoms, levels, levelIndex}) ограничивает подбор докупки только
 // номиналами, реально в игре на текущем уровне блайндов, и их ТЕКУЩЕЙ принимаемой ценностью
 // (выведенный, но ещё не возвращённый номинал в докупку не идёт вообще; возвращённый — идёт по
-// повышенной цене, не по печатной). Без этого докупка могла набираться из уже выведенных из
-// оборота мелких фишек, которые на столе физически никто не принимает
+// повышенной цене, не по печатной). Выведенные номиналы идут в докупку только запасным вариантом,
+// когда активных в коробке на стек уже не хватает (см. ниже)
 function maxStacksFromPool(pool, targetValue, changeBuffer = 0, levelContext = null) {
   // придерживаем немного младшего активного номинала на размен по ходу игры — докупки не
   // имеют права вычерпать его до нуля, иначе банкующему нечем будет давать сдачу
@@ -1119,6 +1119,7 @@ function maxStacksFromPool(pool, targetValue, changeBuffer = 0, levelContext = n
   while (count < cap) {
     let searchPool = remaining;
     let effectiveToPrinted = null;
+    let attempt;
     if (levelContext) {
       const active = activeDenomsAtLevel(levelContext.denoms, levelContext.levels, levelContext.levelIndex);
       effectiveToPrinted = new Map();
@@ -1130,10 +1131,23 @@ function maxStacksFromPool(pool, targetValue, changeBuffer = 0, levelContext = n
           effectiveToPrinted.set(a.effectiveValue, a.value);
         }
       });
+      attempt = searchPool.length ? computeTargetStack(searchPool, 1, targetValue, 1) : { totalValue: 0 };
+      // активных номиналов в коробке на стек не хватает (крупные фишки все на столе, а в резерве
+      // остались выведенные мелкие) — но регламент re-entry ещё открыт, и лишать игрока докупки из-за
+      // этого нельзя: добираем выведенными номиналами по печатной цене, размен — уже за столом
+      if (attempt.totalValue < targetValue) {
+        remaining.forEach(p => {
+          if (p.count > 0 && !active.some(a => a.value === p.value)) {
+            searchPool.push({ value: p.value, count: p.count });
+            effectiveToPrinted.set(p.value, p.value);
+          }
+        });
+        if (searchPool.length) attempt = computeTargetStack(searchPool, 1, targetValue, 1);
+      }
+    } else {
+      attempt = searchPool.length ? computeTargetStack(searchPool, 1, targetValue, 1) : { totalValue: 0 };
     }
-    if (!searchPool.length) break; // активные на этом уровне номиналы в остатке кончились — докупок больше нет
-    const attempt = computeTargetStack(searchPool, 1, targetValue, 1);
-    if (attempt.totalValue < targetValue) break;
+    if (attempt.totalValue < targetValue) break; // в остатке набора стек уже не собрать — докупок больше нет
     count++;
     remaining = remaining.map(d => {
       const used = attempt.perPlayer.find(p => (effectiveToPrinted ? effectiveToPrinted.get(p.value) : p.value) === d.value);
