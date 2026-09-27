@@ -127,7 +127,6 @@
   /* высота строки числа фиксирована — если шрифт ужался под 1 000 / 2 000, подпись не прыгает */
   .blinds .num{white-space:nowrap;font-size:104px;line-height:1;height:104px;display:flex;align-items:center}
   .blinds .sep{flex:none;width:1px;height:128px;background:var(--border)}
-  .blinds.noante .sep,.blinds.noante .ante{display:none}
 
   /* те же правила, что в шапке и у таймеров: весь блок (заголовок + подписи + значения) по центру
      по вертикали, значения по центру своих подписей, иконка таймера по центру связки "подпись + время" */
@@ -143,7 +142,6 @@
   .nextrow .num{color:#8a9bb3;font-size:62px;line-height:1;white-space:nowrap;height:62px;display:flex;align-items:center;justify-content:center}
   .nextrow .tgroup{display:flex;align-items:center;gap:16px}
   .nextrow .tgroup .ico{width:50px;height:50px;color:#3f69a6}
-  .next.noante .ante{display:none}
 
   /* center: structure */
   .structure{flex:1;position:relative;display:grid;place-items:center}
@@ -331,13 +329,17 @@ function demoGame() {
   const levelLeftMs = 12 * MIN + 34000;
   const startedAt = loadedAt - (6 * 20 * MIN - levelLeftMs); // идёт 6-й уровень
   const at = m => new Date(startedAt + m * MIN).toISOString();
+  // ?level=15 — крупные блайнды, ?turbo — уровни с ускорением, ?noante — игра без анте
+  const q = new URLSearchParams(location.search);
+  const demoLevel = Number(q.get('level'));
+  const turbo = q.has('turbo'), noAnte = q.has('noante');
   const sbs = [5,10,15,25,50,75,100,150,200,300,400,500,750,1000,1500,2000,3000];
-  const levels = [{ sb: 5, bb: 10, ante: 0 }, ...sbs.map(sb => ({ sb, bb: sb * 2, ante: sb * 2 }))].map(l => ({ ...l, minutes: 20 }));
+  const levels = (noAnte ? sbs.map(sb => ({ sb, bb: sb * 2, ante: 0 })) : [{ sb: 5, bb: 10, ante: 0 }, ...sbs.map(sb => ({ sb, bb: sb * 2, ante: sb * 2 }))])
+    .map((l, i) => ({ ...l, minutes: turbo ? (i < 4 ? 20 : i < 8 ? 15 : 12) : 20 }));
   const lvl = i => ({ type: 'LEVEL', sb: levels[i].sb, bb: levels[i].bb, ante: levels[i].ante });
-  const demoLevel = Number(new URLSearchParams(location.search).get('level')); // ?level=15 — крупные блайнды
   return {
     status: 'live', startedAt: new Date(startedAt).toISOString(), endedAt: null,
-    buyIn: 0, chipStack: 1000, maxRebuys: 2, levels, lastRebuyLevel: 8,
+    buyIn: 0, chipStack: 1000, maxRebuys: 2, levels, lastRebuyLevel: noAnte ? 7 : 8,
     blindLevel: demoLevel > 1 ? Math.min(demoLevel, levels.length) - 1 : 5,
     timer: { levelEndsAt: loadedAt + levelLeftMs, pausedRemainingMs: null },
     players: { p1:'Вова', p2:'Никита', p3:'Yuriy Shorin', p4:'Данил Шеронов', p5:'Настя', p6:'Ксюша', p7:'Фил', p8:'Артём' },
@@ -400,7 +402,11 @@ function renderStatic(g, d) {
   const lv = g.levels, cur = Math.min(g.blindLevel, lv.length - 1), unit = g.buyIn ? '₽' : 'фишек';
   const hasAnte = lv.some(l => l.ante);
 
-  $('subline').innerHTML = ['Texas Hold’em', g.buyIn ? `Бай-ин ${fmt(g.buyIn)} ₽` : 'No Money', `Уровни по ${lv[cur].minutes} мин`, hasAnte ? 'Анте = BB' : null]
+  // длина уровней — как выбрал организатор: ровные (все по N мин) или с ускорением (20 → 15 → 12)
+  // длины уровней по порядку без повторов: ровные — "Уровни по 20 мин", с ускорением — "Уровни 20 → 15 → 12 мин"
+  const lengths = lv.map(l => l.minutes).filter((m, i, a) => m && m !== a[i - 1]);
+  const scheduleLabel = !lengths.length ? null : lengths.length === 1 ? `Уровни по ${lengths[0]} мин` : `Уровни ${lengths.join(' → ')} мин`;
+  $('subline').innerHTML = ['Texas Hold’em', g.buyIn ? `Бай-ин ${fmt(g.buyIn)} ₽` : 'Бесплатный', scheduleLabel, hasAnte ? 'Анте = BB' : null]
     .filter(Boolean).map(esc).join('<i>•</i>');
   // в шапке — сколько всего заявилось на турнир; сколько ещё в игре — слева в статистике
   $('h-players').textContent = d.N;
@@ -429,11 +435,11 @@ function renderStatic(g, d) {
   // центр
   const nowLv = lv[cur], nxt = lv[cur + 1];
   $('c-blinds').textContent = blinds(nowLv);
-  $('c-ante').textContent = fmt(nowLv.ante);
-  $('blinds').classList.toggle('noante', !hasAnte);
-  $('next').classList.toggle('noante', !hasAnte);
+  // без анте (вся игра или первый уровень игры с анте) — прочерк, а не пустая колонка: вёрстка та же
+  const ante = l => l.ante ? fmt(l.ante) : '—';
+  $('c-ante').textContent = ante(nowLv);
   $('n-blinds').textContent = nxt ? blinds(nxt) : '—';
-  $('n-ante').textContent = nxt ? fmt(nxt.ante) : '—';
+  $('n-ante').textContent = nxt ? ante(nxt) : '—';
 
   // структура: вся лента уровней, в окне видно STEPS_VISIBLE, текущий — 4-й слева
   const lastRe = g.lastRebuyLevel;
