@@ -148,17 +148,18 @@
   .structure .cap{position:absolute;top:22px;left:0;right:0;text-align:center;font-size:19px}
   /* окно на STEPS_VISIBLE уровней; лента внутри целиком, сдвигается transform'ом */
   .ladder-view{width:880px;overflow:hidden;padding-top:40px;margin-top:10px}
-  .ladder{display:flex;align-items:flex-start;transition:transform .8s cubic-bezier(.4,0,.2,1)}
+  .ladder{display:flex;align-items:flex-start;transition:transform 1s cubic-bezier(.22,1,.36,1)}
   .step{flex:none;width:110px;display:flex;flex-direction:column;align-items:center;position:relative}
   .step::before{content:"";position:absolute;top:30px;left:-50%;width:100%;height:2px;background:rgba(120,150,195,.25);z-index:0}
   .step:first-child::before{display:none}
   .dot{position:relative;z-index:1;width:60px;height:60px;border-radius:50%;border:2px solid #9fb2cc;display:grid;place-items:center;
-       font-family:var(--num);font-size:28px;font-weight:700;background:var(--panel);color:var(--text)}
-  .step .b{font-family:var(--num);font-weight:700;font-size:22px;margin-top:14px;color:var(--text-2)}
-  .step .m{font-size:17px;color:var(--dim);margin-top:4px}
+       font-family:var(--num);font-size:28px;font-weight:700;background:var(--panel);color:var(--text);
+       transition:background-color .8s ease,border-color .8s ease,box-shadow .8s ease,color .8s ease,transform .8s cubic-bezier(.22,1,.36,1)}
+  .step .b{font-family:var(--num);font-weight:700;font-size:22px;margin-top:14px;color:var(--text-2);transition:color .8s ease}
+  .step .m{font-size:17px;color:var(--dim);margin-top:4px;transition:color .8s ease}
   .step.past .dot{border-color:rgba(159,178,204,.35);color:var(--dim)}
   .step.past .b{color:var(--dim)}
-  .step.cur .dot{background:var(--accent);border-color:var(--accent);box-shadow:0 0 24px rgba(61,139,255,.6)}
+  .step.cur .dot{background:var(--accent);border-color:var(--accent);box-shadow:0 0 24px rgba(61,139,255,.6);transform:scale(1.08)}
   .step.cur .b,.step.cur .m{color:var(--accent-2)}
   .step.closedre .dot{border-style:dashed}
   /* граница окончания ре-энтри между уровнями */
@@ -183,7 +184,7 @@
   .ev.rebuy .ico{color:var(--gold)}
   .ev.join .ico{color:var(--green)}
   .ev.level .ico{color:var(--accent)}
-  .ev.fresh{animation:flash 2.4s ease-out}
+  .ev.fresh{animation:flash 2.6s ease-out .3s backwards}
   @keyframes flash{0%{background:rgba(61,139,255,.18)}100%{background:transparent}}
   @media (prefers-reduced-motion:reduce){*{animation:none!important}}
   .overlay{position:fixed;inset:0;z-index:10;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;color:var(--text-2);font-size:28px;text-align:center;padding:24px}
@@ -210,7 +211,7 @@
     <div class="brand">
       <div class="logo" data-icon="spade"></div>
       <div>
-        <h1>HOME POKER TOURNAMENT</h1>
+        <h1 id="title">ТУРНИР</h1>
         <div class="sub" id="subline"></div>
       </div>
     </div>
@@ -346,7 +347,7 @@ function demoGame() {
     .map((l, i) => ({ ...l, minutes: turbo ? (i < 4 ? 20 : i < 8 ? 15 : 12) : 20 }));
   const lvl = i => ({ type: 'LEVEL', sb: levels[i].sb, bb: levels[i].bb, ante: levels[i].ante });
   return {
-    status: 'live', startedAt: new Date(startedAt).toISOString(), endedAt: null,
+    status: 'live', gameNo: 12, startedAt: new Date(startedAt).toISOString(), endedAt: null,
     buyIn: 0, chipStack: 1000, maxRebuys: 2, levels, lastRebuyLevel: noAnte ? 7 : 8,
     blindLevel: demoLevel > 1 ? Math.min(demoLevel, levels.length) - 1 : 5,
     timer: { levelEndsAt: loadedAt + levelLeftMs, pausedRemainingMs: null },
@@ -404,7 +405,63 @@ const mmss = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return `${Stri
 const hhmmss = ms => { const s = Math.max(0, Math.ceil(ms / 1000)); return [Math.floor(s / 3600), Math.floor(s / 60) % 60, s % 60].map(x => String(x).padStart(2,'0')).join(':'); };
 const clock = iso => new Date(iso).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' });
 
+let prevRows = new Map(); // подпись строки таблицы на прошлом рендере — чтобы подсветить изменившиеся
 let shownEvents = null; // сколько событий уже было на экране — подсвечиваем только новые
+
+/* ============ анимации ============ */
+// Первый рендер — без анимаций (иначе при открытии всё "въезжает"); дальше — только то, что изменилось.
+// Кривая как у Apple: быстрый старт и долгое мягкое торможение
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const EASE = 'cubic-bezier(.22,1,.36,1)';
+let animate = false;
+
+// FLIP: запоминаем, где элементы были (offsetTop не зависит от масштаба холста), перестраиваем
+// список и плавно довозим каждый со старого места на новое; новые — через onEnter
+function positions(container) {
+  const map = new Map();
+  for (const el of container.children) map.set(el.dataset.key, el.offsetTop);
+  return map;
+}
+
+function flip(container, before, onEnter) {
+  if (!animate || REDUCED) return;
+  for (const el of container.children) {
+    const was = before.get(el.dataset.key);
+    if (was == null) { if (onEnter) onEnter(el); continue; }
+    const dy = was - el.offsetTop;
+    if (dy) el.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: 700, easing: EASE });
+  }
+}
+
+// смена значения: старое уплывает вверх и растворяется, новое поднимается снизу из лёгкого размытия.
+// Если за время анимации пришло ещё одно значение — покажем сразу последнее
+function swap(el, value, { html = false, delay = 0, after } = {}) {
+  const shown = el._value !== undefined ? el._value : html ? el.innerHTML : el.textContent;
+  if (shown === value) return;
+  el._value = value;
+  const put = () => { if (html) el.innerHTML = el._value; else el.textContent = el._value; if (after) after(); };
+  if (!animate || REDUCED) return put();
+  if (el._busy) return;
+  el._busy = true;
+  const out = el.animate(
+    [{ opacity: 1, transform: 'none', filter: 'blur(0)' }, { opacity: 0, transform: 'translateY(-32%)', filter: 'blur(6px)' }],
+    { duration: 260, delay, easing: 'cubic-bezier(.4,0,1,1)', fill: 'forwards' }
+  );
+  // значение обязано смениться, даже если браузер не рисует кадры (вкладка в фоне) и анимация
+  // не доиграла — поэтому кроме onfinish ещё и страховочный таймер
+  const done = () => {
+    if (!el._busy) return;
+    put();
+    out.cancel();
+    el._busy = false;
+    el.animate(
+      [{ opacity: 0, transform: 'translateY(32%)', filter: 'blur(6px)' }, { opacity: 1, transform: 'none', filter: 'blur(0)' }],
+      { duration: 620, easing: EASE }
+    );
+  };
+  out.onfinish = done;
+  setTimeout(done, delay + 400);
+}
 
 function renderStatic(g, d) {
   const lv = g.levels, cur = Math.min(g.blindLevel, lv.length - 1), unit = g.buyIn ? '₽' : 'фишек';
@@ -414,55 +471,76 @@ function renderStatic(g, d) {
   // длины уровней по порядку без повторов: ровные — "Уровни по 20 мин", с ускорением — "Уровни 20 → 15 → 12 мин"
   const lengths = lv.map(l => l.minutes).filter((m, i, a) => m && m !== a[i - 1]);
   const scheduleLabel = !lengths.length ? null : lengths.length === 1 ? `Уровни по ${lengths[0]} мин` : `Уровни ${lengths.join(' → ')} мин`;
+  const title = g.gameNo ? `Турнир №${g.gameNo}` : 'Турнир';
+  $('title').textContent = title.toUpperCase();
+  document.title = `${title} — табло`;
   $('subline').innerHTML = ['Texas Hold’em', g.buyIn ? `Бай-ин ${fmt(g.buyIn)} ₽` : 'Бесплатный', scheduleLabel, hasAnte ? 'Анте = BB' : null]
     .filter(Boolean).map(esc).join('<i>•</i>');
   // в шапке — сколько всего заявилось на турнир; сколько ещё в игре — слева в статистике
-  $('h-players').textContent = d.N;
+  swap($('h-players'), String(d.N));
   $('h-reentry').innerHTML = `${g.maxRebuys}<small>/чел.</small>`;
   $('h-stack').textContent = fmt(g.chipStack);
 
-  $('s-bank').innerHTML = `${fmt(d.bank)}<small>${unit}</small>`;
+  swap($('s-bank'), `${fmt(d.bank)}<small>${unit}</small>`, { html: true });
   const medalColor = ['#ffc54d', '#cfd8e6', '#d88a4e'];
-  $('s-prizes').innerHTML = d.prizes.filter(p => p.amount > 0)
-    .map(p => `<span><i class="medal" style="background:${medalColor[p.place - 1]}">${p.place}</i><b>${fmt(p.amount)}</b></span>`).join('');
-  $('s-players').textContent = `${d.remaining.length} / ${d.N}`;
-  $('s-reentry').textContent = `${d.totalRebuys} / ${g.maxRebuys * d.N}`;
-  $('s-avg').textContent = fmt(d.avg);
-  $('s-total').textContent = fmt(d.totalChips);
+  swap($('s-prizes'), d.prizes.filter(p => p.amount > 0)
+    .map(p => `<span><i class="medal" style="background:${medalColor[p.place - 1]}">${p.place}</i><b>${fmt(p.amount)}</b></span>`).join(''), { html: true, delay: 60 });
+  swap($('s-players'), `${d.remaining.length} / ${d.N}`);
+  swap($('s-reentry'), `${d.totalRebuys} / ${g.maxRebuys * d.N}`);
+  swap($('s-avg'), fmt(d.avg), { delay: 60 });
+  swap($('s-total'), fmt(d.totalChips), { delay: 120 });
 
   // больше 8 строк не влезает — 9-й и 10-й просто не показываем
-  $('standings').innerHTML = d.rows.slice(0, 8).map((r, i) => {
+  const tbody = $('standings');
+  const rowsBefore = positions(tbody);
+  const rowSig = r => [r.points, r.place, r.rebuys, r.ko, r.live].join('|');
+  const changed = new Set(d.rows.filter(r => prevRows.has(r.id) && prevRows.get(r.id) !== rowSig(r)).map(r => r.id));
+  tbody.innerHTML = d.rows.slice(0, 8).map((r, i) => {
     const cls = [i === 0 ? 'lead' : '', r.live || r.place === 1 ? '' : 'out'].join(' ');
     const pts = `${r.points > 0 ? '+' : ''}${r.points}`;
     const ptsCls = r.points > 0 ? 'pos' : r.points < 0 ? 'neg' : '';
-    return `<tr class="${cls}"><td class="place">${r.live ? '<span class="live"></span>' : r.place}</td>` +
+    return `<tr class="${cls}" data-key="${esc(r.id)}"><td class="place">${r.live ? '<span class="live"></span>' : r.place}</td>` +
       `<td class="name">${esc(g.players[r.id])}</td><td class="r pts ${ptsCls}">${pts}</td>` +
       `<td class="r">${r.prize ? fmt(r.prize) : '—'}</td><td class="c">${r.rebuys}</td><td class="c">${r.ko}</td></tr>`;
   }).join('');
+  flip(tbody, rowsBefore, tr => tr.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 600, easing: EASE }));
+  if (animate && !REDUCED) {
+    for (const tr of tbody.children) {
+      if (!changed.has(tr.dataset.key)) continue;
+      tr.animate([{ backgroundColor: 'rgba(61,139,255,.22)' }, { backgroundColor: 'rgba(61,139,255,0)' }], { duration: 1800, delay: 250, easing: 'ease-out', fill: 'backwards' });
+      tr.querySelector('.pts').animate([{ transform: 'scale(1)' }, { transform: 'scale(1.35)' }, { transform: 'scale(1)' }], { duration: 700, delay: 250, easing: EASE });
+    }
+  }
+  prevRows = new Map(d.rows.map(r => [r.id, rowSig(r)]));
 
   // центр
   const nowLv = lv[cur], nxt = lv[cur + 1];
-  $('c-blinds').textContent = blinds(nowLv);
   // без анте (вся игра или первый уровень игры с анте) — прочерк, а не пустая колонка: вёрстка та же
   const ante = l => l.ante ? fmt(l.ante) : '—';
-  $('c-ante').textContent = ante(nowLv);
-  $('n-blinds').textContent = nxt ? blinds(nxt) : '—';
-  $('n-ante').textContent = nxt ? ante(nxt) : '—';
+  // новый уровень: цифры меняются по очереди — текущие блайнды, анте, потом превью следующего
+  swap($('c-blinds'), blinds(nowLv), { after: fitBlinds });
+  swap($('c-ante'), ante(nowLv), { delay: 90, after: fitBlinds });
+  swap($('n-blinds'), nxt ? blinds(nxt) : '—', { delay: 220, after: fitBlinds });
+  swap($('n-ante'), nxt ? ante(nxt) : '—', { delay: 300, after: fitBlinds });
 
   // структура: вся лента уровней, в окне видно STEPS_VISIBLE, текущий — 4-й слева
   const lastRe = g.lastRebuyLevel;
-  let html = '';
-  for (let i = 0; i < lv.length; i++) {
-    const st = i < cur ? 'past' : i === cur ? 'cur' : '';
-    const re = i === lastRe ? 'reend' : i > lastRe ? 'closedre' : '';
-    html += `<div class="step ${st} ${re}"><div class="dot">${i + 1}</div><div class="b">${lv[i].sb}/${lv[i].bb}</div><div class="m">0:${String(lv[i].minutes).padStart(2,'0')}</div>` +
-      (i === lastRe && i < lv.length - 1 ? `<div class="reflag" style="left:100%">КОНЕЦ РЕ-ЭНТРИ</div>` : '') + `</div>`;
+  const ladder = $('ladder');
+  const ladderSig = JSON.stringify([lv, lastRe]);
+  if (ladder.dataset.sig !== ladderSig) {
+    ladder.dataset.sig = ladderSig;
+    ladder.innerHTML = lv.map((l, i) =>
+      `<div class="step${i === lastRe ? ' reend' : i > lastRe ? ' closedre' : ''}"><div class="dot">${i + 1}</div><div class="b">${l.sb}/${l.bb}</div><div class="m">0:${String(l.minutes).padStart(2,'0')}</div>` +
+      (i === lastRe && i < lv.length - 1 ? `<div class="reflag" style="left:100%">КОНЕЦ РЕ-ЭНТРИ</div>` : '') + `</div>`).join('');
   }
-  $('ladder').innerHTML = html;
+  [...ladder.children].forEach((step, i) => {
+    step.classList.toggle('past', i < cur);
+    step.classList.toggle('cur', i === cur);
+  });
   const from = Math.max(0, Math.min(cur - 3, lv.length - STEPS_VISIBLE));
   $('ladder').style.transform = `translateX(${-from * STEP_W}px)`;
 
-  // события — последние 7, новые сверху. Номер уровня в логе не хранится — считаем по порядку
+  // события — сколько влезает, новые сверху. Номер уровня в логе не хранится — считаем по порядку
   const rebuyNo = {}, lastBustIdx = {};
   let levelNo = 0;
   g.log.forEach((e, i) => { if (e.type === 'BUST') lastBustIdx[e.id] = i; });
@@ -489,9 +567,23 @@ function renderStatic(g, d) {
   }).filter(it => it.e.at);
   const fresh = shownEvents != null && items.length > shownEvents;
   shownEvents = items.length;
-  $('events').innerHTML = items.slice(-7).reverse().map((it, i) =>
-    `<div class="ev ${it.cls}${i === 0 && fresh ? ' fresh' : ''}"><div class="time">${clock(it.e.at)}</div><div class="ico" data-icon="${it.icon}"></div>` +
+  const list = $('events');
+  const evBefore = positions(list);
+  list.innerHTML = items.slice(-20).reverse().map((it, i) =>
+    `<div class="ev ${it.cls}${i === 0 && fresh ? ' fresh' : ''}" data-key="${esc([it.e.type, it.e.id || '', it.e.at].join('|'))}"><div class="time">${clock(it.e.at)}</div><div class="ico" data-icon="${it.icon}"></div>` +
     `<div class="txt"><div class="main-t">${it.text}</div><div class="sub">${it.sub}</div></div></div>`).join('');
+  // остальные плавно съезжают вниз, новое — выплывает сверху из размытия
+  // сколько событий показывать — сколько влезает в панель (строки бывают в две строки текста),
+  // а не фиксированное число: лишние снизу убираем, пустого места под списком не остаётся
+  const panel = list.parentElement;
+  const bottom = panel.offsetTop + panel.offsetHeight - 10;
+  while (list.lastElementChild && list.lastElementChild.offsetTop + list.lastElementChild.offsetHeight > bottom) {
+    list.lastElementChild.remove();
+  }
+  flip(list, evBefore, el => el.animate(
+    [{ opacity: 0, transform: 'translateY(-24px) scale(.96)', filter: 'blur(6px)' }, { opacity: 1, transform: 'none', filter: 'blur(0)' }],
+    { duration: 800, delay: 180, easing: EASE, fill: 'backwards' }
+  ));
 
   paintIcons();
 }
@@ -536,6 +628,7 @@ function isBlank(g) {
 }
 
 let lastLevel = null;   // уровень на экране — чтобы заметить смену
+let seenLog = null;     // ключ последнего события на экране — чтобы озвучить только новые
 let warnedLevel = null; // на каком уровне уже прозвучало "осталась минута"
 let prevLeft = null;    // остаток на прошлом тике — предупреждаем при переходе через минуту, а не при открытии страницы
 
@@ -552,9 +645,11 @@ function render(g) {
   if (lastLevel != null && g.blindLevel > lastLevel && g.status === 'live') playLevelUp();
   if (g.blindLevel !== lastLevel) warnedLevel = null;
   lastLevel = g.blindLevel;
+  if (g.status === 'live') playNewEvents(g.log);
   renderStatic(g, derive(g));
   fitBlinds();
   renderTimers();
+  animate = true;
 }
 
 // демо: смена уровня (в живой версии её делает бот и присылает новое состояние)
@@ -626,12 +721,13 @@ function audioCtx() {
   return audio;
 }
 
-function tone(freq, at, dur, { type = 'sine', gain = 0.28 } = {}) {
+function tone(freq, at, dur, { type = 'sine', gain = 0.28, to = null } = {}) {
   const ctx = audioCtx();
   const t0 = ctx.currentTime + at;
   const osc = ctx.createOscillator(), amp = ctx.createGain();
   osc.type = type;
-  osc.frequency.value = freq;
+  osc.frequency.setValueAtTime(freq, t0);
+  if (to) osc.frequency.exponentialRampToValueAtTime(to, t0 + dur); // скольжение высоты — "падение" ноты
   amp.gain.setValueAtTime(0, t0);
   amp.gain.linearRampToValueAtTime(gain, t0 + 0.015);
   amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
@@ -655,6 +751,39 @@ function playLevelUp() {
   [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone(f, i * 0.16, 0.9, { type: 'triangle', gain: 0.3 }));
 }
 
+// те же простые синтезированные ноты, что у сигналов уровня, но свой характер у каждого события:
+// knockout — нисходящая минорная фраза, последняя нота "падает" вниз: человек вылетел
+function playKnockout() {
+  if (!canPlay()) return;
+  tone(783.99, 0, 0.22, { type: 'triangle', gain: 0.26 });  // G5
+  tone(622.25, 0.14, 0.22, { type: 'triangle', gain: 0.26 }); // D#5
+  tone(523.25, 0.28, 0.22, { type: 'triangle', gain: 0.26 }); // C5
+  tone(392, 0.44, 0.9, { type: 'triangle', gain: 0.3, to: 196 }); // G4 → G3
+}
+
+// re-entry / поздний вход — "заплатил": звонкий двухнотный "дзынь" монетки
+function playReentry() {
+  if (!canPlay()) return;
+  tone(987.77, 0, 0.09, { type: 'square', gain: 0.1 });     // B5
+  tone(1318.51, 0.08, 0.35, { type: 'square', gain: 0.1 }); // E6
+}
+
+// новые события с прошлого рендера: свой сигнал за knockout и за re-entry / поздний вход.
+// Отмена (лог стал короче) и первое открытие — молчат; смену уровня озвучивает playLevelUp
+function playNewEvents(log) {
+  const key = e => (e ? [e.type, e.id || '', e.at].join('|') : '');
+  const last = key(log[log.length - 1]);
+  const prev = seenLog;
+  seenLog = last;
+  if (prev === null || !animate || last === prev) return;
+  const idx = log.findIndex(e => key(e) === prev);
+  // прошлого последнего события в логе больше нет — это отмена, а не новое событие
+  if (idx === -1 && prev !== '') return;
+  const fresh = log.slice(idx + 1);
+  if (fresh.some(e => e.type === 'BUST')) playKnockout();
+  if (fresh.some(e => e.type === 'REBUY' || e.type === 'JOIN')) setTimeout(playReentry, fresh.some(e => e.type === 'BUST') ? 1300 : 0);
+}
+
 function updateSoundButton() {
   const btn = $('sound');
   const waiting = soundOn && (!audio || audio.state !== 'running');
@@ -667,9 +796,12 @@ function updateSoundButton() {
 
 $('sound').addEventListener('click', e => {
   e.stopPropagation();
+  // состояние — до создания/возобновления контекста: в момент клика браузер уже разрешает звук,
+  // и иначе "разблокировка" после перезагрузки выглядела бы как "звук работает — выключить"
+  const waiting = soundOn && (!audio || audio.state !== 'running');
   const ctx = audioCtx();
-  if (soundOn && ctx && ctx.state !== 'running') {
-    ctx.resume(); // звук уже был включён — клик только "разблокирует" его после перезагрузки
+  if (waiting) {
+    if (ctx) ctx.resume().then(updateSoundButton); // звук уже был включён — клик только разблокирует его
   } else {
     soundOn = !soundOn;
     try { localStorage.setItem('board-sound', soundOn ? 'on' : 'off'); } catch (err) {}
@@ -678,7 +810,10 @@ $('sound').addEventListener('click', e => {
   updateSoundButton();
 });
 // звук включён, но браузер его ещё не разрешил — подойдёт любой клик по странице
-addEventListener('pointerdown', () => { if (soundOn && audioCtx() && audio.state !== 'running') audio.resume(); });
+addEventListener('pointerdown', e => {
+  if (e.target.closest('#sound')) return; // кнопка разбирается сама
+  if (soundOn && audioCtx() && audio.state !== 'running') audio.resume();
+});
 addEventListener('mousemove', () => { if (canPlay()) updateSoundButton(); });
 updateSoundButton();
 
@@ -703,9 +838,28 @@ if (LIVE_KEY) {
 } else {
   render(demoGame());
   // демо: → переключает уровень, чтобы посмотреть, как листается структура
-  addEventListener('keydown', e => { if (e.key === 'ArrowRight') demoNextLevel(game); });
+  // демо: → — следующий уровень, B — knockout, R — re-entry (посмотреть анимации и звуки)
+  addEventListener('keydown', e => {
+    const g = game, at = new Date().toISOString();
+    if (e.key === 'ArrowRight') return demoNextLevel(g);
+    const alive = Object.keys(g.players).filter(id => !g.busted.includes(id));
+    if ((e.key === 'b' || e.key === 'и') && alive.length > 1) {
+      const id = alive[alive.length - 1], by = alive[Math.floor(Math.random() * (alive.length - 1))];
+      g.busted.push(id); g.knockouts[by]++;
+      g.log.push({ type: 'BUST', id, by, at });
+      render(g);
+    }
+    if ((e.key === 'r' || e.key === 'к') && g.busted.length) {
+      const id = g.busted.find(x => g.rebuys[x] < g.maxRebuys);
+      if (!id) return;
+      g.busted = g.busted.filter(x => x !== id); g.rebuys[id]++;
+      g.log.push({ type: 'REBUY', id, at });
+      render(g);
+    }
+  });
 }
-document.fonts.ready.then(fitBlinds);
+// после загрузки шрифтов меняются ширины и высоты строк — пересчитываем размеры цифр и сколько событий влезает
+document.fonts.ready.then(() => { if (!isBlank(game)) render(game); });
 setInterval(renderTimers, 1000);
 </script>
 </body>
