@@ -58,12 +58,19 @@ const {
   addPendingApproval,
   getPendingApproval,
   getAllPendingApprovals,
-  removePendingApproval
+  removePendingApproval,
+  gameEvents
 } = require('./state');
+const { startScoreboardServer } = require('./scoreboard');
 const { createBackupArchive, inspectBackupArchive, applyBackupArchive } = require('./backup');
 const fs = require('fs');
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
+// веб-табло: публичный адрес (https://191-44-113-101.sslip.io) — без него кнопки "Табло" в закрепе нет,
+// а сервер табло всё равно поднимается на SCOREBOARD_HOST:SCOREBOARD_PORT (снаружи — через Caddy)
+const SCOREBOARD_URL = (process.env.SCOREBOARD_URL || '').replace(/\/+$/, '');
+const SCOREBOARD_PORT = Number(process.env.SCOREBOARD_PORT || 8080);
+const SCOREBOARD_HOST = process.env.SCOREBOARD_HOST || '127.0.0.1';
 const CHANNEL_ID = process.env.CHANNEL_ID;
 const ADMIN_IDS = (process.env.ADMIN_IDS || '')
   .split(',')
@@ -1428,6 +1435,7 @@ async function createGame(ctx, pending) {
 
   const state = {
     gameId: crypto.randomUUID(),
+    boardKey: newBoardKey(),
     gameNo: nextGameNoAvoidingActive(),
     date: new Date().toISOString(),
     adminChatId: ctx.chat.id,
@@ -1771,11 +1779,66 @@ function addTimerWatcher(ownerId, chatId) {
   refreshTimerMessage(ownerId);
 }
 
+// ---------- веб-табло ----------
+// у каждого стола свой случайный ключ — ссылку на табло знает только тот, кто видел кнопку
+function newBoardKey() {
+  return crypto.randomBytes(12).toString('base64url');
+}
+
+function boardUrl(state) {
+  return SCOREBOARD_URL && state.boardKey ? `${SCOREBOARD_URL}/t/${state.boardKey}` : null;
+}
+
+// кнопка под закрепом с таймером; Telegram может не принять адрес (например, localhost при
+// разработке) — тогда закреп живёт без кнопки, а не пропадает целиком
+let boardButtonRejected = false;
+
+function timerExtra(state) {
+  const url = boardUrl(state);
+  if (!url || boardButtonRejected) return {};
+  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
+}
+
+async function withBoardButtonFallback(send, state) {
+  try {
+    return await send(timerExtra(state));
+  } catch (err) {
+    if (boardButtonRejected || !/url|button/i.test(err.message) || !boardUrl(state)) throw err;
+    boardButtonRejected = true;
+    console.error(`Telegram rejected scoreboard button (${boardUrl(state)}): ${err.message}`);
+    return send({});
+  }
+}
+
+// что видит страница табло — без служебного (чаты, закрепы, id сообщений)
+function scoreboardView(state) {
+  const structure = state.structure || {};
+  const levels = (structure.levels || []).map(lv => ({ sb: lv.sb, bb: lv.bb, ante: lv.ante || 0, minutes: lv.minutes || 0 }));
+  const lastRe = state.rebuysAllowed === false || !structure.rebuyRule ? -1 : lastRebuyLevel(structure.rebuyRule);
+  return {
+    gameNo: state.gameNo,
+    startedAt: state.date,
+    endedAt: state.endedAt || null,
+    buyIn: state.buyIn || 0,
+    chipStack: state.chipStack || NOMINAL_CHIP_STACK,
+    maxRebuys: maxRebuysConfigured(state),
+    levels,
+    blindLevel: state.blindLevel || 0,
+    lastRebuyLevel: lastRe,
+    timer: state.timer ? { levelEndsAt: state.timer.levelEndsAt, pausedRemainingMs: state.timer.pausedRemainingMs } : null,
+    players: state.players,
+    rebuys: state.rebuys,
+    knockouts: state.knockouts,
+    busted: state.busted,
+    log: state.log.map(({ type, id, by, sb, bb, ante, at }) => ({ type, id, by, sb, bb, ante, at }))
+  };
+}
+
 // обновить закреп в одном чате; возвращает message_id (новый, если пришлось отправить заново)
-async function refreshTimerIn(chatId, messageId, text) {
+async function refreshTimerIn(chatId, messageId, text, state) {
   if (messageId) {
     try {
-      await bot.telegram.editMessageText(chatId, messageId, undefined, text);
+      await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state);
       return messageId;
     } catch (err) {
       if (/not modified/.test(err.message)) return messageId;
@@ -1783,7 +1846,10 @@ async function refreshTimerIn(chatId, messageId, text) {
       // закреп удалили — отправляем заново
     }
   }
-  const sent = await bot.telegram.sendMessage(chatId, text, { disable_notification: true });
+  const sent = await withBoardButtonFallback(
+    extra => bot.telegram.sendMessage(chatId, text, { disable_notification: true, ...extra }),
+    state
+  );
   await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(() => {});
   return sent.message_id;
 }
@@ -1791,13 +1857,18 @@ async function refreshTimerIn(chatId, messageId, text) {
 async function doRefreshTimerMessage(ownerId) {
   const state = getState(ownerId);
   if (!state || !state.timer) return;
+  // столы, начатые до появления табло, получают ключ при первом обновлении закрепа
+  if (!state.boardKey) {
+    state.boardKey = newBoardKey();
+    setState(ownerId, state);
+  }
   const text = timerText(state);
   const pins = timerPins(state);
   const changed = {};
   for (const chatId of timerChatIds(state)) {
     if (pins[chatId] === 0) continue;
     try {
-      const id = await refreshTimerIn(chatId, pins[chatId], text);
+      const id = await refreshTimerIn(chatId, pins[chatId], text, state);
       if (id !== pins[chatId]) changed[chatId] = id;
     } catch (err) {
       // бот заблокирован / чата нет — у этого человека закрепа не будет, остальным это не мешает
@@ -2152,7 +2223,7 @@ async function finalizeGame(ctx, state, ownerId) {
   });
 
   state.endedAt = new Date().toISOString();
-  clearState(ownerId); // стол освобождён — новую игру можно начинать не дожидаясь подтверждения этой
+  clearState(ownerId, state); // стол освобождён — новую игру можно начинать не дожидаясь подтверждения этой
   await removeTimerMessage(state);
   if (actingOwner.get(ctx.from.id) === ownerId) actingOwner.delete(ctx.from.id);
 
@@ -3018,6 +3089,13 @@ setInterval(() => {
   const me = await bot.telegram.getMe();
   BOT_USERNAME = me.username;
   console.log(`Poker bot started (long polling) as @${BOT_USERNAME}`);
+  startScoreboardServer({
+    port: SCOREBOARD_PORT,
+    host: SCOREBOARD_HOST,
+    gameEvents,
+    getActiveGames,
+    toView: scoreboardView
+  });
   sweepExpiredApprovals().catch(err => console.error('Initial approval sweep failed:', err.message));
   bot.launch(); // не await — промис резолвится только после остановки поллинга
 })();

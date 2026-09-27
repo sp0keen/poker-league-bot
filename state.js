@@ -1,5 +1,10 @@
 const fs = require('fs');
 const path = require('path');
+const { EventEmitter } = require('events');
+
+// изменения столов — на них подписано веб-табло (scoreboard.js), чтобы обновляться сразу после
+// действия в боте. 'change' (ownerId, state) — стол записан; 'clear' (ownerId, prevState) — стол закрыт
+const gameEvents = new EventEmitter();
 
 // несколько одновременных столов: файл хранит { [ownerId]: gameState }
 const GAMES_FILE = path.join(__dirname, 'active_games.json');
@@ -22,12 +27,17 @@ function setState(ownerId, state) {
   const games = loadGames();
   games[ownerId] = state;
   saveGames(games);
+  gameEvents.emit('change', Number(ownerId), state);
 }
 
-function clearState(ownerId) {
+// finalState — итоговое состояние стола при нормальном завершении (с endedAt, который в файл не
+// пишется); без него стол считается отменённым/прерванным
+function clearState(ownerId, finalState = null) {
   const games = loadGames();
+  const prev = games[ownerId] || null;
   delete games[ownerId];
   saveGames(games);
+  if (finalState || prev) gameEvents.emit('clear', Number(ownerId), finalState || prev);
 }
 
 // [{ ownerId: Number, state }] — для панели "Активные игры" у владельца
@@ -83,6 +93,7 @@ module.exports = {
   getPendingApproval,
   getAllPendingApprovals,
   removePendingApproval,
+  gameEvents,
   GAMES_FILE,
   APPROVALS_FILE
 };
