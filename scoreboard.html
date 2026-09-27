@@ -189,12 +189,20 @@
   .overlay{position:fixed;inset:0;z-index:10;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;color:var(--text-2);font-size:28px;text-align:center;padding:24px}
   .overlay[hidden]{display:none}
   .overlay .logo{width:72px;height:80px;color:var(--accent)}
+  /* кнопка звука — вне холста, в углу экрана; когда звук работает, прячется, пока не шевельнуть мышью */
+  .sound{position:fixed;right:14px;bottom:14px;z-index:20;display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;
+         background:rgba(13,29,51,.9);border:1px solid var(--border);color:var(--text-2);font:500 13px 'Roboto',sans-serif;cursor:pointer;
+         transition:opacity .4s}
+  .sound:hover{color:var(--text);border-color:var(--accent)}
+  .sound.idle{opacity:0;pointer-events:none}
+  .sound.wait{color:var(--gold);border-color:rgba(255,197,77,.5)}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
 </style>
 </head>
 <body>
+<button class="sound" id="sound" type="button"></button>
 <div class="overlay" id="overlay" hidden><div class="logo" data-icon="spade"></div><div class="msg"></div></div>
 <div class="stage" id="stage">
 
@@ -527,6 +535,10 @@ function isBlank(g) {
   return !g || g.status === 'missing' || g.status === 'cancelled' || !g.levels || !g.levels.length;
 }
 
+let lastLevel = null;   // уровень на экране — чтобы заметить смену
+let warnedLevel = null; // на каком уровне уже прозвучало "осталась минута"
+let prevLeft = null;    // остаток на прошлом тике — предупреждаем при переходе через минуту, а не при открытии страницы
+
 function render(g) {
   game = g;
   const overlay = $('overlay');
@@ -536,6 +548,10 @@ function render(g) {
     return;
   }
   overlay.hidden = true;
+  // уровень вырос (по таймеру или вручную) — звук смены; отмена смены уровня и переподключение молчат
+  if (lastLevel != null && g.blindLevel > lastLevel && g.status === 'live') playLevelUp();
+  if (g.blindLevel !== lastLevel) warnedLevel = null;
+  lastLevel = g.blindLevel;
   renderStatic(g, derive(g));
   fitBlinds();
   renderTimers();
@@ -565,6 +581,11 @@ function renderTimers() {
   $('elapsed-t').textContent = hhmmss((ended && g.endedAt ? new Date(g.endedAt).getTime() : now()) - start);
 
   const hasNext = cur < lv.length - 1;
+  if (!ended && !paused && hasNext && warnedLevel !== cur && prevLeft > WARN_MS && left <= WARN_MS && left > 0) {
+    warnedLevel = cur;
+    playWarning();
+  }
+  prevLeft = paused ? null : left;
   $('n-in').textContent = ended || !hasNext ? '—' : mmss(left);
   $('n-in-lbl').textContent = paused ? 'ПАУЗА' : 'ЧЕРЕЗ';
   $('next').classList.toggle('paused', paused);
@@ -585,6 +606,81 @@ function renderTimers() {
     $('late-t').textContent = hhmmss(left + after);
   }
 }
+
+/* ============ звук ============ */
+// за минуту до смены блайндов — два коротких сигнала, при смене — восходящий аккорд. Звук синтезируется
+// (WebAudio), файлов нет. Браузер не даёт странице играть звук без клика по ней — поэтому кнопка в углу;
+// выбор запоминается, но после перезагрузки звук снова ждёт любого клика по странице
+const WARN_MS = 60000;
+let audio = null;
+let soundOn = false;
+try { soundOn = localStorage.getItem('board-sound') === 'on'; } catch (e) {}
+
+function audioCtx() {
+  if (!audio) {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    audio = new Ctx();
+    audio.onstatechange = updateSoundButton;
+  }
+  return audio;
+}
+
+function tone(freq, at, dur, { type = 'sine', gain = 0.28 } = {}) {
+  const ctx = audioCtx();
+  const t0 = ctx.currentTime + at;
+  const osc = ctx.createOscillator(), amp = ctx.createGain();
+  osc.type = type;
+  osc.frequency.value = freq;
+  amp.gain.setValueAtTime(0, t0);
+  amp.gain.linearRampToValueAtTime(gain, t0 + 0.015);
+  amp.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+  osc.connect(amp).connect(ctx.destination);
+  osc.start(t0);
+  osc.stop(t0 + dur + 0.05);
+}
+
+function canPlay() {
+  return soundOn && audio && audio.state === 'running';
+}
+
+function playWarning() {
+  if (!canPlay()) return;
+  tone(880, 0, 0.22, { type: 'square', gain: 0.12 });
+  tone(880, 0.32, 0.22, { type: 'square', gain: 0.12 });
+}
+
+function playLevelUp() {
+  if (!canPlay()) return;
+  [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone(f, i * 0.16, 0.9, { type: 'triangle', gain: 0.3 }));
+}
+
+function updateSoundButton() {
+  const btn = $('sound');
+  const waiting = soundOn && (!audio || audio.state !== 'running');
+  btn.textContent = !soundOn ? '🔇 Звук выключен' : waiting ? '🔔 Нажмите, чтобы включить звук' : '🔔 Звук включён';
+  btn.classList.toggle('wait', waiting);
+  btn.classList.remove('idle');
+  clearTimeout(updateSoundButton.hide);
+  if (soundOn && !waiting) updateSoundButton.hide = setTimeout(() => btn.classList.add('idle'), 4000);
+}
+
+$('sound').addEventListener('click', e => {
+  e.stopPropagation();
+  const ctx = audioCtx();
+  if (soundOn && ctx && ctx.state !== 'running') {
+    ctx.resume(); // звук уже был включён — клик только "разблокирует" его после перезагрузки
+  } else {
+    soundOn = !soundOn;
+    try { localStorage.setItem('board-sound', soundOn ? 'on' : 'off'); } catch (err) {}
+    if (soundOn && ctx) ctx.resume().then(playLevelUp); // сразу слышно, как звучит и что громкость ок
+  }
+  updateSoundButton();
+});
+// звук включён, но браузер его ещё не разрешил — подойдёт любой клик по странице
+addEventListener('pointerdown', () => { if (soundOn && audioCtx() && audio.state !== 'running') audio.resume(); });
+addEventListener('mousemove', () => { if (canPlay()) updateSoundButton(); });
+updateSoundButton();
 
 /* масштаб холста под окно */
 function fit() {
