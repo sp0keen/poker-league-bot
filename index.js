@@ -2770,6 +2770,7 @@ function showGameProtocol(ctx, gameId, page) {
   if (data && isAdmin(ctx)) {
     rows.push([Markup.button.callback('✏️ Редактировать результаты', `ge:${gameId}:${page}`)]);
     rows.push([Markup.button.callback('🗑 Удалить игру', `gd:${gameId}:${page}`)]);
+    if (CHANNEL_ID) rows.push([Markup.button.callback('📢 Отправить в канал', `gch:${gameId}:${page}`)]);
   }
   rows.push([Markup.button.callback('⬅️ К списку игр', `hist:page:${page}`)]);
   rows.push([Markup.button.callback('⬅️ Главное меню', 'hist:menu')]);
@@ -2784,6 +2785,33 @@ bot.action(new RegExp(`^hist:game:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
 bot.action('hist:menu', ctx => {
   ctx.answerCbQuery();
   showPanel(ctx, '🏠 Главное меню', replyKb(menuRows(ctx)));
+});
+
+// --- админ: повторная отправка протокола в канал (например, если при завершении не ушёл) ---
+
+bot.action(new RegExp(`^gch:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
+  ctx.answerCbQuery();
+  const [, gameId, page] = ctx.match;
+  showRichPanelInline(ctx, '<p>📢 Отправить протокол этой игры в канал? Если он там уже есть, появится второй раз.</p>', [
+    [Markup.button.callback('✅ Отправить', `gchc:${gameId}:${page}`), Markup.button.callback('❌ Отмена', `hist:game:${gameId}:${page}`)]
+  ]);
+});
+
+bot.action(new RegExp(`^gchc:([0-9a-f-]+):(${HIST_REF})$`), async ctx => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
+  const [, gameId, page] = ctx.match;
+  const data = getGameById(gameId);
+  if (!data) return ctx.answerCbQuery('Игра не найдена', { show_alert: true });
+  try {
+    await sendRich(CHANNEL_ID, protocolHtmlFromDb(data));
+    console.log(`Protocol (game #${data.game.game_no}) re-sent to channel ${CHANNEL_ID} by ${ctx.from.id}`);
+    ctx.answerCbQuery('Отправлено в канал').catch(() => {});
+  } catch (err) {
+    console.error(`Protocol (game #${data.game.game_no}) re-send to channel ${CHANNEL_ID} failed:`, err.message);
+    ctx.answerCbQuery(`Не ушло: ${err.message}`.slice(0, 190), { show_alert: true }).catch(() => {});
+  }
+  showGameProtocol(ctx, gameId, page);
 });
 
 // --- админ: удаление игры целиком ---
