@@ -91,6 +91,60 @@ if (!ADMIN_IDS.length) {
 
 const bot = new Telegraf(BOT_TOKEN);
 
+// ---------- 429 Too Many Requests: пауза по чату ----------
+// Telegram на перебор лимита отвечает 429 с parameters.retry_after (секунды). Пока оно не истекло,
+// любые запросы в этот чат только продлевают бан — поэтому таймер этот чат не трогает вовсе, а
+// живой экран не удаляется (иначе меню исчезнет, а новое отправить нельзя)
+const chatCooldownUntil = new Map(); // chatId (string) -> ms timestamp
+
+function retryAfterOf(err) {
+  const code = err && (err.code || err.error_code || (err.response && err.response.error_code));
+  if (code !== 429) return null;
+  const params = err.parameters || (err.response && err.response.parameters) || {};
+  return Number(params.retry_after) || 30;
+}
+
+function noteRateLimit(chatId, err) {
+  const retryAfter = retryAfterOf(err);
+  if (retryAfter == null || chatId == null) return;
+  const until = Date.now() + retryAfter * 1000;
+  const key = String(chatId);
+  if ((chatCooldownUntil.get(key) || 0) < until) {
+    chatCooldownUntil.set(key, until);
+    console.error(`429 in chat ${key}: retry_after ${retryAfter}s — pausing timer updates until ${new Date(until).toISOString()}`);
+  }
+}
+
+function chatCooldownLeftMs(chatId) {
+  const until = chatCooldownUntil.get(String(chatId));
+  if (!until) return 0;
+  const left = until - Date.now();
+  if (left <= 0) chatCooldownUntil.delete(String(chatId));
+  return Math.max(0, left);
+}
+
+// все вызовы Telegraf (bot.telegram.* и ctx.reply/ctx.editMessageText — это тот же объект) идут через
+// callApi: здесь ловим 429 и запоминаем паузу для чата, откуда бы запрос ни пришёл
+const origCallApi = bot.telegram.callApi.bind(bot.telegram);
+bot.telegram.callApi = async (method, payload = {}, opts) => {
+  try {
+    return await origCallApi(method, payload, opts);
+  } catch (err) {
+    noteRateLimit(payload && payload.chat_id, err);
+    throw err;
+  }
+};
+
+// действия пользователя важнее таймера: пока человек жмёт кнопки, закреп в его чате не редактируем,
+// чтобы ответы на кнопки не делили лимит чата с таймером
+const USER_PRIORITY_MS = 3000;
+const lastUserActionAt = new Map(); // chatId (string) -> ms timestamp
+
+bot.use((ctx, next) => {
+  if (ctx.chat) lastUserActionAt.set(String(ctx.chat.id), Date.now());
+  return next();
+});
+
 // в личке в диалоге должен висеть только актуальный экран — сообщение пользователя (кнопка
 // reply-клавиатуры, команда, введённый текст) удаляется сразу после обработки. Документы не трогаем:
 // это файл бэкапа для /restore, а бэкапы в чате должны оставаться всегда
@@ -160,7 +214,13 @@ async function callTelegramApi(method, payload) {
     body: JSON.stringify(payload)
   });
   const data = await resp.json();
-  if (!data.ok) throw new Error(`${method} failed: ${data.description}`);
+  if (!data.ok) {
+    const err = new Error(`${method} failed: ${data.description}`);
+    err.code = data.error_code;
+    err.parameters = data.parameters;
+    noteRateLimit(payload && payload.chat_id, err);
+    throw err;
+  }
   return data.result;
 }
 
@@ -170,6 +230,7 @@ async function sendRichRaw(chatId, html, replyMarkup) {
   try {
     return await callTelegramApi('sendRichMessage', payload);
   } catch (err) {
+    if (retryAfterOf(err) != null) throw err; // лимит чата — запасной вариант упрётся в тот же лимит
     console.error('sendRichMessage failed, falling back to plain text:', err.message);
     const plain = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     const fallbackPayload = { chat_id: chatId, text: plain };
@@ -195,6 +256,8 @@ const liveMessageIds = new Map();
 
 // по chatId, а не ctx — таймер уровней меняет экран сам, без действия пользователя
 async function clearLiveMessagesIn(chatId) {
+  // чат под 429: новое сообщение всё равно не отправится — старое меню оставляем, чтобы было что нажать
+  if (chatCooldownLeftMs(chatId)) return;
   const ids = liveMessageIds.get(chatId) || [];
   liveMessageIds.delete(chatId);
   for (const id of ids) {
@@ -1487,7 +1550,7 @@ async function createGame(ctx, pending) {
 
   // закреп с таймером — раньше панели, чтобы панель оставалась последним сообщением в чате
   await clearLiveMessages(ctx);
-  await refreshTimerMessage(ctx.from.id);
+  await refreshTimerMessage(ctx.from.id, { force: true });
   const html = gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSchedule, prizes, buyIn });
   await showRichPanel(ctx, html, gameRows(state));
 }
@@ -1703,7 +1766,7 @@ bot.hears(BTN_NEXT_LEVEL, ctx => {
   if (state.timer) setTimerRemaining(state, levelDurationMs(state, state.blindLevel));
   state.log.push({ type: 'LEVEL', sb: lv.sb, bb: lv.bb, ante: lv.ante, prevRemainingMs, at: new Date().toISOString() });
   setState(ownerId, state);
-  refreshTimerMessage(ownerId);
+  refreshTimerMessage(ownerId, { force: true });
   showRichPanel(ctx, `<p>▶️ <b>Новый уровень:</b> ${blindsLabel(lv)}</p>` + statusHtml(state), gameRows(state));
 });
 
@@ -1711,7 +1774,8 @@ bot.hears(BTN_NEXT_LEVEL, ctx => {
 // Время хранится как момент окончания уровня (levelEndsAt), а не как счётчик — так таймер переживает
 // перезапуск бота: после старта он сам догоняет уровень, который должен идти сейчас. На паузе вместо
 // момента окончания хранится остаток (pausedRemainingMs). Сам таймер — закреплённое сообщение в чате
-// организатора и зрителей (см. timerPins), которое бот редактирует раз в TIMER_TICK_MS, а не шлёт заново
+// организатора и зрителей (см. timerPins), которое бот проверяет раз в TIMER_TICK_MS,
+// а редактирует не чаще TIMER_EDIT_MIN_INTERVAL_MS (сразу — при смене уровня/паузы)
 
 const TIMER_TICK_MS = 5000;
 
@@ -1763,9 +1827,10 @@ function timerText(state, now = Date.now()) {
 // не найти закреп и отправить два
 const timerRefreshQueue = new Map(); // ownerId -> Promise
 
-function refreshTimerMessage(ownerId) {
+// force — смена уровня/пауза/отмена/старт: обновить сразу, не дожидаясь TIMER_EDIT_MIN_INTERVAL_MS
+function refreshTimerMessage(ownerId, { force = false } = {}) {
   const next = (timerRefreshQueue.get(ownerId) || Promise.resolve())
-    .then(() => doRefreshTimerMessage(ownerId))
+    .then(() => doRefreshTimerMessage(ownerId, force))
     .catch(err => console.error('Timer refresh failed:', err.message));
   timerRefreshQueue.set(ownerId, next);
   return next;
@@ -1851,14 +1916,43 @@ function scoreboardView(state) {
   };
 }
 
+// не чаще раза в 15 сек на чат (лимит Telegram на правки в одном чате). Смена уровня или паузы
+// (см. timerRenderKey) и явный force обходят этот интервал, но не 429-паузу и не приоритет пользователя
+const TIMER_EDIT_MIN_INTERVAL_MS = 15000;
+const timerShown = new Map(); // chatId (string) -> { messageId, text, key, at } — что сейчас в закрепе
+
+// уровень и пауза — то, что должно обновиться сразу, а не через 15 сек
+function timerRenderKey(state) {
+  return `${state.blindLevel || 0}|${isTimerPaused(state) ? 'p' : 'r'}`;
+}
+
+function shouldSkipTimerEdit(chatId, messageId, text, key, force) {
+  if (chatCooldownLeftMs(chatId)) return true;
+  // закрепа ещё нет (старт игры) — отправляем сразу, чтобы он оказался выше панели. Пропущенное из-за
+  // действия пользователя обновление догонит следующий тик: уровень/пауза поменяли key
+  if (messageId && Date.now() - (lastUserActionAt.get(String(chatId)) || 0) < USER_PRIORITY_MS) return true;
+  const shown = timerShown.get(String(chatId));
+  if (!shown || !messageId || shown.messageId !== messageId) return false;
+  if (shown.text === text) return true; // текст не изменился — не редактируем
+  if (force || shown.key !== key) return false;
+  return Date.now() - shown.at < TIMER_EDIT_MIN_INTERVAL_MS;
+}
+
 // обновить закреп в одном чате; возвращает message_id (новый, если пришлось отправить заново)
-async function refreshTimerIn(chatId, messageId, text, state) {
+async function refreshTimerIn(chatId, messageId, text, state, force = false) {
+  const key = timerRenderKey(state);
+  if (shouldSkipTimerEdit(chatId, messageId, text, key, force)) return messageId;
+  const remember = id => timerShown.set(String(chatId), { messageId: id, text, key, at: Date.now() });
   if (messageId) {
     try {
       await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state);
+      remember(messageId);
       return messageId;
     } catch (err) {
-      if (/not modified/.test(err.message)) return messageId;
+      if (/not modified/.test(err.message)) {
+        remember(messageId);
+        return messageId;
+      }
       if (!/not found|can't be edited/.test(err.message)) throw err;
       // закреп удалили — отправляем заново
     }
@@ -1867,11 +1961,14 @@ async function refreshTimerIn(chatId, messageId, text, state) {
     extra => bot.telegram.sendMessage(chatId, text, { disable_notification: true, ...extra }),
     state
   );
-  await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(() => {});
+  remember(sent.message_id);
+  await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(err => {
+    console.error(`Timer pin in ${chatId} failed:`, err.message);
+  });
   return sent.message_id;
 }
 
-async function doRefreshTimerMessage(ownerId) {
+async function doRefreshTimerMessage(ownerId, force = false) {
   const state = getState(ownerId);
   if (!state || !state.timer) return;
   // столы, начатые до появления табло, получают ключ при первом обновлении закрепа
@@ -1885,12 +1982,13 @@ async function doRefreshTimerMessage(ownerId) {
   for (const chatId of timerChatIds(state)) {
     if (pins[chatId] === 0) continue;
     try {
-      const id = await refreshTimerIn(chatId, pins[chatId], text, state);
+      const id = await refreshTimerIn(chatId, pins[chatId], text, state, force);
       if (id !== pins[chatId]) changed[chatId] = id;
     } catch (err) {
       // бот заблокирован / чата нет — у этого человека закрепа не будет, остальным это не мешает
       if (/blocked|chat not found|deactivated|Forbidden/.test(err.message)) changed[chatId] = 0;
-      else console.error(`Timer refresh in ${chatId} failed:`, err.message);
+      else if (retryAfterOf(err) == null) console.error(`Timer refresh in ${chatId} failed:`, err.message);
+      // 429 уже залогирован в noteRateLimit, чат на паузе — до её конца сюда не придём
     }
   }
   if (!Object.keys(changed).length) return;
@@ -1911,6 +2009,7 @@ async function doRefreshTimerMessage(ownerId) {
 async function removeTimerMessage(state) {
   if (!state.timer) return;
   for (const [chatId, id] of Object.entries(timerPins(state))) {
+    timerShown.delete(String(chatId));
     if (!id) continue;
     await bot.telegram.unpinChatMessage(chatId, id).catch(() => {});
     await bot.telegram.deleteMessage(chatId, id).catch(() => {});
@@ -1945,6 +2044,10 @@ async function announceLevelUp(ownerId) {
   if (!state) return;
   const lv = state.structure.levels[state.blindLevel];
   const chatId = state.adminChatId;
+  if (chatCooldownLeftMs(chatId)) {
+    console.error(`Level-up notice in ${chatId} skipped: chat is rate-limited for ${Math.ceil(chatCooldownLeftMs(chatId) / 1000)}s`);
+    return;
+  }
   await clearLiveMessagesIn(chatId);
   const html = `<p>🔔 <b>Новый уровень ${state.blindLevel + 1}:</b> ${blindsLabel(lv)}</p>` + statusHtml(state);
   trackLiveMessageIn(chatId, await sendRich(chatId, html, gameRows(state)));
@@ -1958,7 +2061,7 @@ async function timerTick() {
   try {
     for (const { ownerId } of getActiveGames()) {
       const leveledUp = advanceLevelsByTimer(ownerId);
-      await refreshTimerMessage(ownerId);
+      await refreshTimerMessage(ownerId, { force: leveledUp });
       if (leveledUp) await announceLevelUp(ownerId).catch(err => console.error('Level-up notice failed:', err.message));
     }
   } finally {
@@ -1983,7 +2086,7 @@ function setTimerPaused(ctx, paused) {
       state.timer.pausedRemainingMs = null;
     }
     setState(ownerId, state);
-    refreshTimerMessage(ownerId);
+    refreshTimerMessage(ownerId, { force: true });
   }
   const note = paused ? '⏸ <b>Таймер на паузе</b>' : '⏯ <b>Таймер снова идёт</b>';
   showRichPanel(ctx, `<p>${note}</p>` + statusHtml(state), gameRows(state));
@@ -2025,7 +2128,7 @@ bot.hears(BTN_CANCEL, ctx => {
   if (!cancelLastEvent(ownerId, state)) {
     return showRichPanel(ctx, `<p>Нечего отменять.</p>` + statusHtml(state), gameRows(state));
   }
-  refreshTimerMessage(ownerId); // отменили смену уровня или re-entry — закреп должен это показать сразу
+  refreshTimerMessage(ownerId, { force: true }); // отменили смену уровня или re-entry — закреп должен это показать сразу
   showRichPanel(ctx, `<p>↩️ <b>Последнее событие отменено</b></p>` + statusHtml(state), gameRows(state));
 });
 
@@ -2255,10 +2358,9 @@ async function finalizeGame(ctx, state, ownerId) {
     );
     // из БД, а не formatProtocolHtml(state,...): там уже есть застывший snapshot рейтинга до/после
     const protocol = protocolHtmlFromDb(getGameById(state.gameId)) + news;
+    // в канал — первым и независимо от чата владельца: 429 там не должен оставлять канал без протокола
+    await sendProtocolToChannel(protocol, `game #${state.gameNo}`);
     await showRichPanel(ctx, protocol, menuRows(ctx));
-    if (CHANNEL_ID) {
-      await sendRich(CHANNEL_ID, protocol);
-    }
     if (ownerId !== ctx.from.id) {
       // владелец завершил чужой стол через "Активные турниры" — организатора стоит уведомить
       await sendRich(ownerId, `<p>🏁 <b>Владелец лиги завершил ваш турнир.</b></p>` + protocol).catch(() => {});
@@ -2300,6 +2402,23 @@ async function finalizeGame(ctx, state, ownerId) {
   }
 }
 
+// ошибка отправки в канал не глушится: пишем в лог и сообщаем владельцам (если их чат не под 429)
+async function sendProtocolToChannel(protocol, label) {
+  if (!CHANNEL_ID) return;
+  try {
+    await sendRich(CHANNEL_ID, protocol);
+    console.log(`Protocol (${label}) sent to channel ${CHANNEL_ID}`);
+  } catch (err) {
+    console.error(`Protocol (${label}) to channel ${CHANNEL_ID} failed:`, err.message);
+    for (const adminId of ADMIN_IDS) {
+      if (chatCooldownLeftMs(adminId)) continue;
+      await bot.telegram
+        .sendMessage(adminId, `⚠️ Протокол (${label}) не ушёл в канал: ${err.message}`)
+        .catch(e => console.error('Channel failure notice failed:', e.message));
+    }
+  }
+}
+
 bot.action(/^appr:([0-9a-f-]+)$/, async ctx => {
   if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
   const approval = getPendingApproval(ctx.match[1]);
@@ -2315,10 +2434,10 @@ bot.action(/^appr:([0-9a-f-]+)$/, async ctx => {
   );
   const protocol = protocolHtmlFromDb(getGameById(approval.state.gameId)) + news;
 
-  ctx.answerCbQuery('Подтверждено');
+  ctx.answerCbQuery('Подтверждено').catch(() => {});
+  await sendProtocolToChannel(protocol, `game #${approval.state.gameNo}`);
   await ctx.deleteMessage().catch(() => {});
   await showRichPanel(ctx, `<p>✅ <b>Подтверждено и добавлено в статистику.</b></p>` + protocol, menuRows(ctx));
-  if (CHANNEL_ID) await sendRich(CHANNEL_ID, protocol);
   await sendRich(approval.requestedBy, `<p>✅ <b>Твой турнир подтверждён!</b> Он в статистике и канале.</p>` + protocol).catch(() => {});
   await sendBackupToAdmins(`🗄 Автобэкап после турнира №${approval.state.gameNo}`);
 });
@@ -2668,6 +2787,7 @@ function showGameProtocol(ctx, gameId, page) {
   if (data && isAdmin(ctx)) {
     rows.push([Markup.button.callback('✏️ Редактировать результаты', `ge:${gameId}:${page}`)]);
     rows.push([Markup.button.callback('🗑 Удалить игру', `gd:${gameId}:${page}`)]);
+    if (CHANNEL_ID) rows.push([Markup.button.callback('📢 Отправить в канал', `gch:${gameId}:${page}`)]);
   }
   rows.push([Markup.button.callback('⬅️ К списку игр', `hist:page:${page}`)]);
   rows.push([Markup.button.callback('⬅️ Главное меню', 'hist:menu')]);
@@ -2682,6 +2802,33 @@ bot.action(new RegExp(`^hist:game:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
 bot.action('hist:menu', ctx => {
   ctx.answerCbQuery();
   showPanel(ctx, '🏠 Главное меню', replyKb(menuRows(ctx)));
+});
+
+// --- админ: повторная отправка протокола в канал (например, если при завершении не ушёл) ---
+
+bot.action(new RegExp(`^gch:([0-9a-f-]+):(${HIST_REF})$`), ctx => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
+  ctx.answerCbQuery();
+  const [, gameId, page] = ctx.match;
+  showRichPanelInline(ctx, '<p>📢 Отправить протокол этой игры в канал? Если он там уже есть, появится второй раз.</p>', [
+    [Markup.button.callback('✅ Отправить', `gchc:${gameId}:${page}`), Markup.button.callback('❌ Отмена', `hist:game:${gameId}:${page}`)]
+  ]);
+});
+
+bot.action(new RegExp(`^gchc:([0-9a-f-]+):(${HIST_REF})$`), async ctx => {
+  if (!isAdmin(ctx)) return ctx.answerCbQuery('Только для владельца');
+  const [, gameId, page] = ctx.match;
+  const data = getGameById(gameId);
+  if (!data) return ctx.answerCbQuery('Игра не найдена', { show_alert: true });
+  try {
+    await sendRich(CHANNEL_ID, protocolHtmlFromDb(data));
+    console.log(`Protocol (game #${data.game.game_no}) re-sent to channel ${CHANNEL_ID} by ${ctx.from.id}`);
+    ctx.answerCbQuery('Отправлено в канал').catch(() => {});
+  } catch (err) {
+    console.error(`Protocol (game #${data.game.game_no}) re-send to channel ${CHANNEL_ID} failed:`, err.message);
+    ctx.answerCbQuery(`Не ушло: ${err.message}`.slice(0, 190), { show_alert: true }).catch(() => {});
+  }
+  showGameProtocol(ctx, gameId, page);
 });
 
 // --- админ: удаление игры целиком ---
