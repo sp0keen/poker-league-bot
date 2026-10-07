@@ -36,7 +36,9 @@ const {
 const { DYNAMIC_TITLES } = require('./titles');
 const { ACHIEVEMENTS } = require('./achievements');
 const {
+  CHIP_SETS,
   STANDARD_CHIPSET,
+  anteRepeatsFirstLevel,
   computeStandardStack,
   computeTargetStack,
   computeBlindLevels,
@@ -675,7 +677,7 @@ bot.hears(BTN_CHANNEL, ctx => {
   });
 });
 
-// правила для стандартного набора фишек (главное меню) — тот же расчёт и тот же компактный
+// правила для набора фишек по умолчанию (первый в списке, главное меню) — тот же расчёт и тот же компактный
 // вид, что и у "Правил турнира" внутри конкретной игры, просто по дефолтному набору
 // таблица начисления очков — только на главной странице "Правила", в конкретном турнире
 // (gameRulesHtml со state) не дублируется
@@ -692,14 +694,22 @@ function scoringRulesHtml() {
   );
 }
 
+// как устроено анте — у разных наборов по-разному (с повтором первого уровня или без)
+function anteRuleText(denoms) {
+  return anteRepeatsFirstLevel(denoms)
+    ? 'Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.'
+    : 'Первый уровень — без анте, со 2-го уровня анте на всех уровнях.';
+}
+
 // как устроена игра по времени — сами настройки выбираются перед стартом каждого турнира
-function timeRulesHtml() {
+function timeRulesHtml(levels) {
+  const last = lastRebuyLevel(computeRebuySchedule(levels));
   return (
     `<h3>⏱ Уровни по времени</h3>` +
     `<p>Блайнды растут по таймеру — бот сам повышает уровень и присылает уведомление. Перед стартом выбирается:</p>` +
     `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.</li>` +
-    `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.</li></ul>` +
-    `<p>💰 <b>Re-entry</b> открыт до конца уровня 150/300 включительно.</p>`
+    `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. ${anteRuleText(STANDARD_CHIPSET)}</li></ul>` +
+    (last >= 0 ? `<p>💰 <b>Re-entry</b> открыт до конца уровня ${blindsLabel(levels[last])} включительно.</p>` : '')
   );
 }
 
@@ -707,13 +717,13 @@ function rulesHtml() {
   const denoms = STANDARD_CHIPSET;
   const N = 8;
   const stackResult = computeStandardStack(denoms, N);
-  const levels = computeBlindLevels(denoms);
+  const levels = computeBlindLevels(denoms, { ante: CHIP_SETS[0].anteFromLevel2 });
   const rebuyRule = computeRebuySchedule(levels);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const staticReserveStacks = maxUsableStacksFromReserve(denoms, stackResult, N);
   return (
     gameRulesHtml({ stackResult, levels, rebuyRule, denomSchedule, buyIn: 0, staticReserveStacks }) +
-    timeRulesHtml() +
+    timeRulesHtml(levels) +
     scoringRulesHtml()
   );
 }
@@ -757,9 +767,12 @@ function chipSetSummary(denoms) {
 
 function chipSetPrompt() {
   return {
-    text: `🃏 ${b('Набор фишек')}\nСтандартный (${chipSetSummary(STANDARD_CHIPSET)}) или свой?`,
+    text:
+      `🃏 ${b('Набор фишек')}\n` +
+      CHIP_SETS.map(set => `${set.name}: ${chipSetSummary(set.denoms)}`).join('\n') +
+      `\n\nВыбери набор или введи свой:`,
     keyboard: kb([
-      [Markup.button.callback('📦 Стандартный', 'ng:chip:standard')],
+      ...CHIP_SETS.map(set => [Markup.button.callback(`📦 ${set.name}`, `ng:chip:set:${set.key}`)]),
       [Markup.button.callback('✏️ Свой набор', 'ng:chip:custom')],
       [Markup.button.callback('❌ Отмена', 'ng:cancel')]
     ])
@@ -793,10 +806,14 @@ bot.action('ng:cancel', ctx => {
 
 // --- шаг 1: набор фишек ---
 
-bot.action('ng:chip:standard', ctx => {
+bot.action(/^ng:chip:set:(\w+)$/, ctx => {
   const pending = pendingNewGame.get(ctx.from.id);
   if (!pending) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
-  pending.chipSet = STANDARD_CHIPSET;
+  const set = CHIP_SETS.find(s => s.key === ctx.match[1]);
+  if (!set) return ctx.answerCbQuery('Набор не найден, выбери заново');
+  pending.chipSet = set.denoms;
+  // у наборов, где анте идёт со 2-го уровня, сетка изначально считалась с анте — включаем его сразу
+  pending.ante = set.anteFromLevel2;
   ctx.answerCbQuery();
   const p = buyInPrompt();
   ctx.editMessageText(p.text, p.keyboard);
@@ -1519,7 +1536,7 @@ function settingsPrompt(pending) {
   const text =
     `⏱ ${b('Настройки турнира')}\n\n` +
     `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.\n\n` +
-    `${b('Анте')} — для быстрой игры: равно большому блайнду, платит его игрок на BB. Со 2-го уровня: первый уровень повторяется с теми же блайндами, но уже с анте.\n\n` +
+    `${b('Анте')} — для быстрой игры: равно большому блайнду, платит его игрок на BB. ${anteRuleText(pending.chipSet)}\n\n` +
     rebuyLine;
   // выбранный вариант — зелёным (style: 'success', как в рейтинге) и галочкой, если клиент стиль не рисует
   const option = (selected, label, data) => {

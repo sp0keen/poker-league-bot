@@ -3,26 +3,60 @@
 // блайндов, докупки 2 стека -> 1 стек -> запрещены по третям уровней, отработавший номинал
 // уходит из игры и возвращается позже как ×100 от своего исходного значения.
 
-const STANDARD_CHIPSET = [
-  { value: 5, count: 120 },
-  { value: 10, count: 120 },
-  { value: 25, count: 120 },
-  { value: 50, count: 120 },
-  { value: 100, count: 120 }
+// готовые наборы фишек — в том порядке, в каком они показываются при создании игры. Для каждого
+// стартовый стек и сетка блайндов подобраны руками (не выводятся по формуле, поэтому просто зашиты
+// как есть). Цель — 100бб: SB/BB стартового уровня всегда равны младшим двум номиналам.
+// anteFromLevel2: с анте первый уровень играется без него, а со второго анте = BB — без повтора
+// первого уровня (у Юрца, наоборот, первый уровень с анте повторяется — см. computeBlindLevels)
+const CHIP_SETS = [
+  {
+    key: 'nekit',
+    name: 'Некит',
+    denoms: [
+      { value: 10, count: 50 },
+      { value: 20, count: 100 },
+      { value: 50, count: 100 },
+      { value: 100, count: 175 },
+      { value: 500, count: 75 }
+    ],
+    // итого 2000 (100бб при 10/20), 19 фишек; рассчитан на 8 игроков × 2 re-entry
+    stack: { 10: 2, 20: 4, 50: 4, 100: 7, 500: 2 },
+    sbLadder: [10, 20, 30, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1500],
+    anteFromLevel2: true
+  },
+  {
+    key: 'yurets',
+    name: 'Юрец',
+    denoms: [
+      { value: 5, count: 120 },
+      { value: 10, count: 120 },
+      { value: 25, count: 120 },
+      { value: 50, count: 120 },
+      { value: 100, count: 120 }
+    ],
+    // итого 1000, 32 фишки. Довесок сверх прежних 500 намеренно взят сотками и полтинниками, а не
+    // крупными номиналами — младшие чипы и так уже станут блайндами на ранних уровнях
+    stack: { 5: 10, 10: 5, 25: 8, 50: 4, 100: 5 },
+    // рост ×1.25–2 за уровень (а не удвоение), и каждый блайнд ставится одной-двумя фишками. 20/40
+    // пропущен намеренно — между 15/30 и 25/50 он почти ничего не меняет
+    sbLadder: [5, 10, 15, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000],
+    anteFromLevel2: false
+  }
 ];
 
-// эталонная раскладка стартового стека для дефолтного набора 5/10/25/50/100 (проверенная,
-// подобранная руками для удобной игры — не выводится по формуле, поэтому просто зашита как есть).
-// Цель — 100бб (SB/BB стартового уровня всегда равны младшим двум номиналам, см. computeBlindLevels),
-// а не голая сумма: довесок сверх прежних 500 намеренно взят сотками и полтинниками, а не крупными
-// номиналами — младшие чипы и так уже станут блайндами на ранних уровнях, а не будут лежать мёртвым
-// грузом, как лежала бы, например, фишка 500 при блайндах 5/10
-const REFERENCE_STACK = { 5: 10, 10: 5, 25: 8, 50: 4, 100: 5 }; // итого 1000, 32 фишки
+// набор по умолчанию (правила в главном меню) — первый в списке
+const STANDARD_CHIPSET = CHIP_SETS[0].denoms;
 
-function isReferenceChipset(denoms) {
+// готовый набор узнаём по номиналам (а не по количеству): своя раскладка и сетка подходят и тогда,
+// когда фишек того же набора в наличии больше или меньше
+function findChipSetPreset(denoms) {
   const values = denoms.map(d => d.value).sort((a, b) => a - b);
-  const ref = Object.keys(REFERENCE_STACK).map(Number).sort((a, b) => a - b);
-  return values.length === ref.length && values.every((v, i) => v === ref[i]);
+  return (
+    CHIP_SETS.find(set => {
+      const ref = set.denoms.map(d => d.value);
+      return values.length === ref.length && values.every((v, i) => v === ref[i]);
+    }) || null
+  );
 }
 
 // темп турнира — влияет на то, сколько фишек уходит в стартовые стеки, а сколько остаётся в
@@ -57,13 +91,14 @@ const LEGACY_TEMPO_PRESETS = {
 // × 100" даёт смехотворно маленький стек и вообще не трогает старшие номиналы, хотя набор
 // спокойно тянет больше — берём то из двух, что даёт более щедрый стек.
 function computeStandardStack(denoms, N, tempo = 'normal') {
-  if (tempo === 'normal' && isReferenceChipset(denoms)) {
-    const cap = Math.min(...denoms.map(d => Math.floor(d.count / N)));
-    const needsMost = Math.max(...Object.values(REFERENCE_STACK));
-    if (cap >= needsMost) {
-      const perPlayer = Object.entries(REFERENCE_STACK)
-        .map(([value, take]) => ({ value: Number(value), take }))
-        .sort((a, b) => a.value - b.value);
+  const chipSetPreset = tempo === 'normal' ? findChipSetPreset(denoms) : null;
+  if (chipSetPreset) {
+    const perPlayer = Object.entries(chipSetPreset.stack)
+      .map(([value, take]) => ({ value: Number(value), take }))
+      .sort((a, b) => a.value - b.value);
+    // раскладка годится, только если каждого номинала хватает на всех за столом
+    const fits = perPlayer.every(p => Math.floor(denoms.find(d => d.value === p.value).count / N) >= p.take);
+    if (fits) {
       const totalValue = perPlayer.reduce((s, d) => s + d.value * d.take, 0);
       const totalPieces = perPlayer.reduce((s, d) => s + d.take, 0);
       return { perPlayer, totalValue, totalPieces, shortfall: 0 };
@@ -212,12 +247,6 @@ function computeTargetStack(denoms, N, targetValue, reserveFactor = RESERVE_FACT
 
 // ---------- блайнды (игра по времени) ----------
 
-// эталонная сетка малых блайндов для набора 5/10/25/50/100 (BB = 2×SB) — подобрана руками, как и
-// REFERENCE_STACK: рост ×1.25–2 за уровень (а не удвоение), и каждый блайнд ставится одной-двумя
-// фишками. 20/40 пропущен намеренно — ставить удобно, но между 15/30 и 25/50 он почти ничего не
-// меняет. Пятёрки нужны до 15/30 включительно, поэтому до 25/50 их не разменивают
-const REFERENCE_SB_LADDER = [5, 10, 15, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000];
-
 // "круглые" мантиссы для своего набора фишек — блайнд всегда вида m×10^k
 const NICE_MANTISSAS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 7.5, 8];
 const MIN_LEVEL_GROWTH = 1.25;
@@ -252,14 +281,25 @@ const LEVEL_SCHEDULES = {
 
 // { ante, schedule } — настройки турнира. Анте = большой блайнд, платит его игрок на BB (BB ante).
 // С анте первый уровень повторяется дважды: сначала без анте, потом те же блайнды с анте, а дальше
-// анте на всех уровнях — как в офлайн-структуре. Без анте этого повтора нет
+// анте на всех уровнях — как в офлайн-структуре. Без анте этого повтора нет. У наборов с
+// anteFromLevel2 повтора нет и с анте: первый уровень без анте, со второго анте = BB
 function computeBlindLevels(denoms, { ante = false, schedule = 'flat' } = {}) {
   const d = [...denoms].map(x => x.value).sort((a, b) => a - b);
-  const sbs = isReferenceChipset(denoms) ? REFERENCE_SB_LADDER : generateSbLadder(d);
+  const chipSetPreset = findChipSetPreset(denoms);
+  const sbs = chipSetPreset ? chipSetPreset.sbLadder : generateSbLadder(d);
   let levels = sbs.map(sb => ({ sb, bb: sb * 2, ante: 0 }));
-  if (ante) levels = [levels[0], ...levels.map(lv => ({ ...lv, ante: lv.bb }))];
+  if (ante) {
+    levels = anteRepeatsFirstLevel(denoms)
+      ? [levels[0], ...levels.map(lv => ({ ...lv, ante: lv.bb }))]
+      : levels.map((lv, i) => ({ ...lv, ante: i === 0 ? 0 : lv.bb }));
+  }
   const minutes = (LEVEL_SCHEDULES[schedule] || LEVEL_SCHEDULES.flat).minutes;
   return levels.map((lv, i) => ({ ...lv, minutes: minutes(i) }));
+}
+
+function anteRepeatsFirstLevel(denoms) {
+  const chipSetPreset = findChipSetPreset(denoms);
+  return !(chipSetPreset && chipSetPreset.anteFromLevel2);
 }
 
 // "50/100" или "50/100/100" с анте
@@ -389,7 +429,10 @@ function parseChipSet(text) {
 }
 
 module.exports = {
+  CHIP_SETS,
   STANDARD_CHIPSET,
+  findChipSetPreset,
+  anteRepeatsFirstLevel,
   computeStandardStack,
   computeTargetStack,
   computeBlindLevels,
