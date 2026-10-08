@@ -758,7 +758,7 @@ function scoringRulesHtml() {
 
 // как устроена игра по времени — сами настройки выбираются перед стартом каждого турнира
 function timeRulesHtml(levels) {
-  const last = lastRebuyLevel(computeRebuySchedule(levels));
+  const last = lastRebuyLevel(computeRebuySchedule(levels, STANDARD_CHIPSET));
   return (
     `<h3>⏱ Уровни по времени</h3>` +
     `<p>Блайнды растут по таймеру — бот сам повышает уровень и присылает уведомление. Перед стартом выбирается:</p>` +
@@ -773,7 +773,7 @@ function rulesHtml() {
   const N = 8;
   const stackResult = computeStandardStack(denoms, N);
   const levels = computeBlindLevels(denoms, { ante: CHIP_SETS[0].anteByDefault, schedule: 'turbo' });
-  const rebuyRule = computeRebuySchedule(levels);
+  const rebuyRule = computeRebuySchedule(levels, denoms);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const staticReserveStacks = maxUsableStacksFromReserve(denoms, stackResult, N);
   return (
@@ -1347,7 +1347,7 @@ function canRebuyNow(state) {
 function computeStructureFor(denoms, buyIn, N, settings = {}) {
   const stackResult = buyIn ? computeTargetStack(denoms, N, buyIn) : computeStandardStack(denoms, N);
   const levels = computeBlindLevels(denoms, settings);
-  const rebuyRule = computeRebuySchedule(levels);
+  const rebuyRule = computeRebuySchedule(levels, denoms);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const prizes = prizeBreakdown(stackResult.totalValue * N, N);
   const rebuysAllowed = maxUsableStacksFromReserve(denoms, stackResult, N) > 0;
@@ -1581,7 +1581,7 @@ function settingsSummary(structure) {
 function settingsPrompt(pending) {
   const settings = tournamentSettings(pending);
   const levels = computeBlindLevels(pending.chipSet, settings);
-  const rebuyRule = computeRebuySchedule(levels);
+  const rebuyRule = computeRebuySchedule(levels, pending.chipSet);
   const last = lastRebuyLevel(rebuyRule);
   const windowMinutes = levels.slice(0, last + 1).reduce((s, lv) => s + lv.minutes, 0);
   const rebuyLine =
