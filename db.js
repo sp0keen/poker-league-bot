@@ -595,18 +595,32 @@ function getTitleHolders() {
     claim('bot', Number(id), st.name, avg, lower);
   });
 
-  // "Бык"/"Медведь" — рост/падение рейтинга в ПОСЛЕДНЕМ сыгранном турнире лиги (одна конкретная
-  // игра, а не "у каждого своя последняя" — иначе в титуле мог бы остаться человек, который сам
-  // месяц не играл, просто потому что никто после него не переиграл его старую дельту), среди
-  // тех, кто в нём реально участвовал. Пересчитывается заново каждый раз, а не через claim()
-  if (rows.length) {
-    const lastGameId = rows[rows.length - 1].gameId;
-    const lastGameRows = rows.filter(r => r.gameId === lastGameId && r.rankBefore != null && r.rankAfter != null);
-    lastGameRows.forEach(r => {
-      const delta = r.rankBefore - r.rankAfter;
-      if (delta > 0) claim('bull', r.telegramId, r.name, delta, higher);
-      if (delta < 0) claim('bear', r.telegramId, r.name, delta, lower);
+  // "Бык"/"Медведь" — кто сильнее всех поднялся/упал в общем рейтинге за ПОСЛЕДНИЙ турнир, в
+  // котором вообще кто-то сдвинулся. Сравнение только внутри одной игры (а не рекорд за всю
+  // историю): каждый турнир с движением передаёт титул заново, даже если сдвиг меньше прежнего.
+  // Если же за турнир ни у кого место не изменилось (рейтинг расслоился и маленький стол никого
+  // не переставил), титул остаётся у прежнего хозяина, а не пустеет
+  i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j < rows.length && rows[j].gameId === rows[i].gameId) j++;
+    const moved = rows
+      .slice(i, j)
+      .filter(r => r.rankBefore != null && r.rankAfter != null)
+      .map(r => ({ r, delta: r.rankBefore - r.rankAfter }));
+    [
+      ['bull', moved.filter(m => m.delta > 0), higher],
+      ['bear', moved.filter(m => m.delta < 0), lower]
+    ].forEach(([titleId, candidates, cmp]) => {
+      if (!candidates.length) return;
+      const best = candidates.reduce((a, b) => (cmp(b.delta, a.delta) ? b : a)).delta;
+      const tied = candidates.filter(m => m.delta === best);
+      // при ничьей внутри игры действующий хозяин (если он среди лучших) титул не теряет
+      const curId = holders[titleId] ? holders[titleId].telegramId : null;
+      const pick = tied.find(m => m.r.telegramId === curId) || tied[0];
+      holders[titleId] = { telegramId: pick.r.telegramId, name: pick.r.name, value: pick.delta };
     });
+    i = j;
   }
 
   const result = {};
