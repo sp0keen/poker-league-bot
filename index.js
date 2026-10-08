@@ -772,7 +772,7 @@ function rulesHtml() {
   const denoms = STANDARD_CHIPSET;
   const N = 8;
   const stackResult = computeStandardStack(denoms, N);
-  const levels = computeBlindLevels(denoms, { ante: CHIP_SETS[0].anteByDefault, schedule: 'turbo' });
+  const levels = computeBlindLevels(denoms, { ante: true, schedule: 'turbo' });
   const rebuyRule = computeRebuySchedule(levels, denoms);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const staticReserveStacks = maxUsableStacksFromReserve(denoms, stackResult, N);
@@ -867,8 +867,6 @@ bot.action(/^ng:chip:set:(\w+)$/, ctx => {
   const set = CHIP_SETS.find(s => s.key === ctx.match[1]);
   if (!set) return ctx.answerCbQuery('Набор не найден, выбери заново');
   pending.chipSet = set.denoms;
-  // сетка набора подобрана под игру с анте — включаем его сразу (на экране настроек можно выключить)
-  pending.ante = set.anteByDefault;
   ctx.answerCbQuery();
   const p = buyInPrompt();
   ctx.editMessageText(p.text, p.keyboard);
@@ -1554,7 +1552,8 @@ function pluralDocupki() {
 // ---------- настройки турнира: длина уровней и анте ----------
 
 function tournamentSettings(pending) {
-  return { schedule: pending.schedule || 'flat', ante: Boolean(pending.ante) };
+  // по умолчанию — с ускорением и с анте (на экране настроек можно переключить)
+  return { schedule: pending.schedule || 'turbo', ante: pending.ante !== false };
 }
 
 // "2 ч 20 мин" / "40 мин"
