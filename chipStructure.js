@@ -7,6 +7,7 @@
 // стартовый стек и сетка блайндов подобраны руками (не выводятся по формуле, поэтому просто зашиты
 // как есть). Цель — 100бб: SB/BB стартового уровня всегда равны младшим двум номиналам.
 // anteByDefault: сетка набора изначально подобрана под игру с анте — при выборе набора анте сразу включено
+// rebuyCloseBbMult: свой порог закрытия re-entry вместо общего REBUY_CLOSE_BB_MULT (см. computeRebuySchedule)
 const CHIP_SETS = [
   {
     key: 'nekit',
@@ -21,7 +22,9 @@ const CHIP_SETS = [
     // итого 2000 (100бб при 10/20), 19 фишек; рассчитан на 8 игроков × 2 re-entry
     stack: { 10: 2, 20: 4, 50: 4, 100: 7, 500: 2 },
     sbLadder: [10, 20, 30, 40, 60, 80, 100, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1500],
-    anteByDefault: true
+    anteByDefault: true,
+    // re-entry до конца 100/200 включительно: стек re-entry — ещё 10 BB, а не докупка на пару раздач
+    rebuyCloseBbMult: 10
   },
   {
     key: 'yurets',
@@ -303,8 +306,10 @@ const REBUY_CLOSE_BB_MULT = 30;
 const REBUY_OPEN = '✅ Открыт';
 const REBUY_CLOSED = '❌ Запрещены';
 
-function computeRebuySchedule(levels) {
-  const limit = levels[0].bb * REBUY_CLOSE_BB_MULT;
+function computeRebuySchedule(levels, denoms) {
+  const chipSetPreset = denoms ? findChipSetPreset(denoms) : null;
+  const mult = (chipSetPreset && chipSetPreset.rebuyCloseBbMult) || REBUY_CLOSE_BB_MULT;
+  const limit = levels[0].bb * mult;
   return levels.map(lv => (lv.bb <= limit ? REBUY_OPEN : REBUY_CLOSED));
 }
 
