@@ -6,8 +6,7 @@
 // готовые наборы фишек — в том порядке, в каком они показываются при создании игры. Для каждого
 // стартовый стек и сетка блайндов подобраны руками (не выводятся по формуле, поэтому просто зашиты
 // как есть). Цель — 100бб: SB/BB стартового уровня всегда равны младшим двум номиналам.
-// anteFromLevel2: с анте первый уровень играется без него, а со второго анте = BB — без повтора
-// первого уровня (у Юрца, наоборот, первый уровень с анте повторяется — см. computeBlindLevels)
+// anteByDefault: сетка набора изначально подобрана под игру с анте — при выборе набора анте сразу включено
 const CHIP_SETS = [
   {
     key: 'nekit',
@@ -21,8 +20,8 @@ const CHIP_SETS = [
     ],
     // итого 2000 (100бб при 10/20), 19 фишек; рассчитан на 8 игроков × 2 re-entry
     stack: { 10: 2, 20: 4, 50: 4, 100: 7, 500: 2 },
-    sbLadder: [10, 20, 30, 50, 100, 150, 200, 300, 400, 600, 800, 1000, 1500],
-    anteFromLevel2: true
+    sbLadder: [10, 20, 30, 40, 60, 80, 100, 150, 200, 250, 300, 400, 500, 600, 800, 1000, 1500],
+    anteByDefault: true
   },
   {
     key: 'yurets',
@@ -40,7 +39,7 @@ const CHIP_SETS = [
     // рост ×1.25–2 за уровень (а не удвоение), и каждый блайнд ставится одной-двумя фишками. 20/40
     // пропущен намеренно — между 15/30 и 25/50 он почти ничего не меняет
     sbLadder: [5, 10, 15, 25, 50, 75, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000, 3000],
-    anteFromLevel2: false
+    anteByDefault: false
   }
 ];
 
@@ -281,25 +280,15 @@ const LEVEL_SCHEDULES = {
 
 // { ante, schedule } — настройки турнира. Анте = большой блайнд, платит его игрок на BB (BB ante).
 // С анте первый уровень повторяется дважды: сначала без анте, потом те же блайнды с анте, а дальше
-// анте на всех уровнях — как в офлайн-структуре. Без анте этого повтора нет. У наборов с
-// anteFromLevel2 повтора нет и с анте: первый уровень без анте, со второго анте = BB
+// анте на всех уровнях — как в офлайн-структуре. Без анте этого повтора нет
 function computeBlindLevels(denoms, { ante = false, schedule = 'flat' } = {}) {
   const d = [...denoms].map(x => x.value).sort((a, b) => a - b);
   const chipSetPreset = findChipSetPreset(denoms);
   const sbs = chipSetPreset ? chipSetPreset.sbLadder : generateSbLadder(d);
   let levels = sbs.map(sb => ({ sb, bb: sb * 2, ante: 0 }));
-  if (ante) {
-    levels = anteRepeatsFirstLevel(denoms)
-      ? [levels[0], ...levels.map(lv => ({ ...lv, ante: lv.bb }))]
-      : levels.map((lv, i) => ({ ...lv, ante: i === 0 ? 0 : lv.bb }));
-  }
+  if (ante) levels = [levels[0], ...levels.map(lv => ({ ...lv, ante: lv.bb }))];
   const minutes = (LEVEL_SCHEDULES[schedule] || LEVEL_SCHEDULES.flat).minutes;
   return levels.map((lv, i) => ({ ...lv, minutes: minutes(i) }));
-}
-
-function anteRepeatsFirstLevel(denoms) {
-  const chipSetPreset = findChipSetPreset(denoms);
-  return !(chipSetPreset && chipSetPreset.anteFromLevel2);
 }
 
 // "50/100" или "50/100/100" с анте
@@ -432,7 +421,6 @@ module.exports = {
   CHIP_SETS,
   STANDARD_CHIPSET,
   findChipSetPreset,
-  anteRepeatsFirstLevel,
   computeStandardStack,
   computeTargetStack,
   computeBlindLevels,
