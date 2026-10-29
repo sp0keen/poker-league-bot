@@ -1,6 +1,6 @@
 const path = require('path');
 const Database = require('better-sqlite3');
-const { placementPoints } = require('./scoring');
+const { gamePoints, pointsMultiplier } = require('./scoring');
 const { prizeBreakdown } = require('./chipStructure');
 const { MIN_GAMES_FOR_AVG_TITLE } = require('./titles');
 
@@ -73,6 +73,11 @@ if (!gameCols.includes('events_log')) {
   // JSON-массив событий (выбывания/докупки) с таймстампами — для хронологии в протоколе
   db.exec('ALTER TABLE games ADD COLUMN events_log TEXT');
 }
+if (!gameCols.includes('points_multiplier')) {
+  // коэффициент очков этой игры (турбо — 0.5, см. scoring.js). Хранится, чтобы правка результата
+  // задним числом считала очки так же, как при сохранении. Все игры до него — ×1
+  db.exec('ALTER TABLE games ADD COLUMN points_multiplier REAL NOT NULL DEFAULT 1');
+}
 
 const resultCols = db.prepare('PRAGMA table_info(results)').all().map(c => c.name);
 if (!resultCols.includes('rank_before')) {
@@ -107,7 +112,7 @@ function getPlayerByTelegramId(telegramId) {
 
 function saveGameResults(state, results, N) {
   const insertGame = db.prepare(
-    'INSERT INTO games (id, date, num_players, players, buy_in, ended_at, chip_stack, events_log) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO games (id, date, num_players, players, buy_in, ended_at, chip_stack, events_log, points_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   const insertResult = db.prepare(`
     INSERT INTO results (game_id, telegram_id, player_name, place, rebuys, knockouts, placement_points, total_points)
@@ -140,7 +145,8 @@ function saveGameResults(state, results, N) {
       state.buyIn || 0,
       state.endedAt || new Date().toISOString(),
       state.chipStack || NOMINAL_CHIP_STACK,
-      JSON.stringify(state.log || [])
+      JSON.stringify(state.log || []),
+      pointsMultiplier(state.structure && state.structure.schedule)
     );
     results.forEach(r => {
       insertResult.run(state.gameId, r.telegramId, r.name, r.place, r.rebuys, r.knockouts, r.placementPts, r.total);
@@ -453,8 +459,13 @@ function updateGameResult(gameId, telegramId, { place, rebuys, knockouts }) {
   const old = db.prepare('SELECT * FROM results WHERE game_id = ? AND telegram_id = ?').get(gameId, telegramId);
   if (!game || !old) return null;
 
-  const placementPts = placementPoints(place, game.num_players);
-  const total = placementPts - 2 * rebuys + knockouts;
+  const { placementPts, total } = gamePoints({
+    place,
+    N: game.num_players,
+    rebuys,
+    knockouts,
+    multiplier: game.points_multiplier
+  });
 
   const tx = db.transaction(() => {
     db.prepare(`

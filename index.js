@@ -1,7 +1,7 @@
 require('dotenv').config();
 const crypto = require('crypto');
 const { Telegraf, Markup, Input } = require('telegraf');
-const { placementPoints, PLACEMENT_POINTS } = require('./scoring');
+const { PLACEMENT_POINTS, pointsMultiplier, applyMultiplier, gamePoints } = require('./scoring');
 const {
   registerPlayer,
   getAllPlayers,
@@ -760,7 +760,8 @@ function scoringRulesHtml() {
     `<h3>🏅 Очки за место</h3>` +
     `<table><tr><th>Игроков</th><th>Очки за место</th></tr>${rows}</table>` +
     `<p>🔪 <b>Knockout:</b> +1 очко тому, кто выбил.<br>` +
-    `💰 <b>Re-entry:</b> −2 очка за каждую (максимум 2 re-entry на игрока, пока re-entry открыт).</p>`
+    `💰 <b>Re-entry:</b> −2 очка за каждую (максимум 2 re-entry на игрока, пока re-entry открыт).<br>` +
+    `⚡ <b>Турбо-турнир</b> (уровни по 5 мин): итог за игру ×0,5 с округлением до целого, ровно ,5 — вверх, но минус в ноль не превращается. Например, 10 → 5, 5 → 3, −1 → −1, −3 → −1, −5 → −2.</p>`
   );
 }
 
@@ -770,7 +771,7 @@ function timeRulesHtml(levels) {
   return (
     `<h3>⏱ Уровни по времени</h3>` +
     `<p>Блайнды растут по таймеру — бот сам повышает уровень и присылает уведомление. Перед стартом выбирается:</p>` +
-    `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12; турбо — все уровни по 5 мин.</li>` +
+    `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12; турбо — все уровни по 5 мин, очки за игру ×0,5.</li>` +
     `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.</li>` +
     `<li><b>Re-entry</b>: можно выключить совсем — тогда выбывший игрок за стол не возвращается.</li></ul>` +
     (last >= 0 ? `<p>💰 <b>Re-entry</b> открыт до конца уровня ${blindsLabel(levels[last])} включительно.</p>` : '')
@@ -1067,10 +1068,11 @@ function liveStandingsHtml(state, N, prizes, unit) {
   };
   const remainingIds = remainingPlayers(state);
   const bustedIds = state.busted;
+  const multiplier = statePointsMultiplier(state);
   // место (и с ним очки за него) ещё не определено, но докупки/выбивания уже реально случились —
   // показываем то, что уже точно набежало, а не глухой прочерк, будто ничего не произошло
   const rows = remainingIds.map(id => {
-    const partial = state.knockouts[id] - 2 * state.rebuys[id];
+    const partial = applyMultiplier(state.knockouts[id] - 2 * state.rebuys[id], multiplier);
     return {
       id,
       points: partial,
@@ -1084,7 +1086,13 @@ function liveStandingsHtml(state, N, prizes, unit) {
   for (let i = bustedIds.length - 1; i >= 0; i--) {
     const id = bustedIds[i];
     const place = N - i;
-    const points = placementPoints(place, N) - 2 * state.rebuys[id] + state.knockouts[id];
+    const { total: points } = gamePoints({
+      place,
+      N,
+      rebuys: state.rebuys[id],
+      knockouts: state.knockouts[id],
+      multiplier
+    });
     rows.push({
       id,
       points,
@@ -1106,8 +1114,19 @@ function liveStandingsHtml(state, N, prizes, unit) {
   return (
     `<h3>📊 Турнирная таблица на текущий момент</h3>` +
     `<table><tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Приз</th><th>Re-entry</th><th>Knockouts</th></tr>${body}</table>` +
-    `<p><i>🟢 — ещё играет: очки за место сюда не входят, оно пока не определено.</i></p>`
+    `<p><i>🟢 — ещё играет: очки за место сюда не входят, оно пока не определено.` +
+    (multiplier !== 1 ? `<br>${pointsMultiplierNote(multiplier)}` : '') +
+    `</i></p>`
   );
+}
+
+// коэффициент очков игры по её схеме уровней (турбо — ×0.5, см. scoring.js)
+function statePointsMultiplier(state) {
+  return pointsMultiplier(state.structure && state.structure.schedule);
+}
+
+function pointsMultiplierNote(multiplier) {
+  return `⚡ Турбо-турнир: очки за игру ×${String(multiplier).replace('.', ',')}, с округлением до целого.`;
 }
 
 function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, buyIn, staticReserveStacks }) {
@@ -1598,7 +1617,8 @@ function settingsSummary(structure) {
   const schedule = LEVEL_SCHEDULES[structure.schedule] || LEVEL_SCHEDULES.flat;
   return (
     `⏱ <b>Уровни:</b> ${schedule.label.toLowerCase()} · <b>Анте:</b> ${structure.ante ? 'вкл' : 'выкл'}` +
-    ` · <b>Re-entry:</b> ${structure.reentry === false ? 'выкл' : 'вкл'}`
+    ` · <b>Re-entry:</b> ${structure.reentry === false ? 'выкл' : 'вкл'}` +
+    (pointsMultiplier(structure.schedule) !== 1 ? ` · <b>Очки:</b> ×${String(pointsMultiplier(structure.schedule)).replace('.', ',')}` : '')
   );
 }
 
@@ -1615,7 +1635,7 @@ function settingsPrompt(pending) {
       : '';
   const text =
     `⏱ ${b('Настройки турнира')}\n\n` +
-    `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12. Турбо — все уровни по 5 мин.\n\n` +
+    `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12. Турбо — все уровни по 5 мин, очки за игру ×0,5.\n\n` +
     `${b('Анте')} — для быстрой игры: равно большому блайнду, платит его игрок на BB. Со 2-го уровня: первый уровень повторяется с теми же блайндами, но уже с анте.\n\n` +
     rebuyLine;
   // выбранный вариант — зелёным (style: 'success', как в рейтинге) и галочкой, если клиент стиль не рисует
@@ -2465,8 +2485,13 @@ async function finalizeGame(ctx, state, ownerId) {
 
   const results = order.map((id, idx) => {
     const place = idx + 1;
-    const placementPts = placementPoints(place, N);
-    const total = placementPts - 2 * state.rebuys[id] + state.knockouts[id];
+    const { placementPts, total } = gamePoints({
+      place,
+      N,
+      rebuys: state.rebuys[id],
+      knockouts: state.knockouts[id],
+      multiplier: statePointsMultiplier(state)
+    });
     return {
       telegramId: Number(id),
       name: state.players[id],
@@ -3245,7 +3270,7 @@ function eventsLogHtml(events, startedAt, nameById, maxRebuys) {
   return `<h3>📜 Хронология</h3><table><tr><th>Время</th><th>Событие</th></tr>${rows}</table>`;
 }
 
-function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, rows, events, nameById, maxRebuys = 2 }) {
+function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, rows, events, nameById, maxRebuys = 2, multiplier = 1 }) {
   const title = gameNo ? `🏆 Протокол турнира №${gameNo}` : '🏆 Протокол турнира';
   const dateLine = endedAt
     ? `${fmtDate(startedAt)}, ${fmtTime(startedAt)}–${fmtTime(endedAt)}`
@@ -3266,6 +3291,7 @@ function protocolTableHtml({ gameNo, startedAt, endedAt, N, buyIn, chipStack, ro
     `<b>Бай-ин:</b> ${stake} ${unit}`,
     `<b>Банк:</b> ${bankLine}`
   ];
+  if (multiplier !== 1) metaLines.push(`<b>Очки:</b> ⚡ турбо ×${String(multiplier).replace('.', ',')}`);
 
   const headerRow =
     '<tr><th>Место</th><th>Игрок</th><th>Очки</th><th>Выигрыш</th><th>Рейтинг</th><th>Re-entry</th><th>Knockouts</th></tr>';
@@ -3313,6 +3339,7 @@ function formatProtocolHtml(state, results, N) {
     events: state.log,
     nameById: state.players,
     maxRebuys: maxRebuysConfigured(state),
+    multiplier: statePointsMultiplier(state),
     rows: results.map(r => ({
       place: r.place,
       name: r.name,
@@ -3339,6 +3366,7 @@ function protocolHtmlFromDb({ game, results }) {
     chipStack: game.chip_stack,
     events: game.events_log ? JSON.parse(game.events_log) : [],
     nameById,
+    multiplier: game.points_multiplier || 1,
     rows: results.map(r => ({
       place: r.place,
       name: r.player_name,

@@ -17,4 +17,27 @@ function placementPoints(place, N) {
   return PLACEMENT_POINTS[N][place - 1];
 }
 
-module.exports = { placementPoints, PLACEMENT_POINTS };
+// коэффициент очков по схеме уровней: турбо-турнир идёт в разы быстрее, и без скидки несколько
+// турбо подряд обгоняли бы по очкам обычные турниры. Схемы без записи здесь — ×1
+const POINTS_MULTIPLIER_BY_SCHEDULE = { fast5: 0.5 };
+
+function pointsMultiplier(schedule) {
+  return POINTS_MULTIPLIER_BY_SCHEDULE[schedule] || 1;
+}
+
+// итог умножается целиком и округляется до целого, ровно .5 — вверх: 5 → 3, −3 → −1.
+// Минус в ноль не превращается: −1 остаётся −1, иначе вылет первым в турбо ничего бы не стоил
+function applyMultiplier(points, multiplier = 1) {
+  if (multiplier === 1) return points;
+  const rounded = Math.floor(points * multiplier + 0.5);
+  if (points < 0 && rounded >= 0) return -1;
+  return rounded || 0; // || 0 — без −0
+}
+
+// очки игрока за игру: место − 2 за каждый re-entry + 1 за каждый knockout, затем коэффициент
+function gamePoints({ place, N, rebuys, knockouts, multiplier = 1 }) {
+  const placementPts = placementPoints(place, N);
+  return { placementPts, total: applyMultiplier(placementPts - 2 * rebuys + knockouts, multiplier) };
+}
+
+module.exports = { placementPoints, PLACEMENT_POINTS, pointsMultiplier, applyMultiplier, gamePoints };
