@@ -54,6 +54,7 @@ const {
   getState,
   setState,
   clearState,
+  moveState,
   getActiveGames,
   hasActiveGames,
   addPendingApproval,
@@ -492,6 +493,7 @@ const BTN_RESUME = '⏯ Продолжить';
 const BTN_ADD_PLAYER = '➕ Добавить игрока';
 const BTN_CANCEL = '↩️ Отменить последнее';
 const BTN_GAME_RULES = '📋 Правила турнира';
+const BTN_TRANSFER_HOST = '👑 Передать хост';
 const BTN_ENDGAME = '🏁 Завершить турнир';
 const BTN_BACK_TO_MENU = '⬅️ Главное меню';
 const BTN_ACTIVE_GAMES = '🕹 Активные турниры';
@@ -501,9 +503,15 @@ const BTN_ACTIVE_GAMES = '🕹 Активные турниры';
 // управлением, организатору со своим столом сразу его стол, остальным чужие турниры можно только
 // смотреть в реальном времени, без управления), правила турнира, статистика/рейтинг, история/канал
 function menuRows(ctx) {
+  return menuRowsFor(ctx.from.id);
+}
+
+// то же меню по id — для сообщений, которые бот шлёт сам, без действия этого пользователя
+function menuRowsFor(userId) {
   const rows = [];
-  const myTable = getState(ctx.from.id);
-  if (canOrganize(ctx) && !myTable) rows.push([BTN_NEWGAME]);
+  const myTable = getState(userId);
+  const canOrganizeUser = ADMIN_IDS.includes(userId) || !!getPlayerByTelegramId(userId);
+  if (canOrganizeUser && !myTable) rows.push([BTN_NEWGAME]);
   if (hasActiveGames()) rows.push([BTN_ACTIVE_GAMES]);
   rows.push([BTN_ME, BTN_RATING]);
   rows.push([BTN_HISTORY, BTN_RULES]);
@@ -548,7 +556,7 @@ function gameRows(state) {
     topRow,
     [...timerRow, BTN_CANCEL],
     ...(canAddPlayer(state) ? [[BTN_ADD_PLAYER]] : []),
-    [BTN_GAME_RULES],
+    [BTN_GAME_RULES, BTN_TRANSFER_HOST],
     [BTN_ENDGAME, BTN_BACK_TO_MENU]
   ];
 }
@@ -762,8 +770,9 @@ function timeRulesHtml(levels) {
   return (
     `<h3>⏱ Уровни по времени</h3>` +
     `<p>Блайнды растут по таймеру — бот сам повышает уровень и присылает уведомление. Перед стартом выбирается:</p>` +
-    `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.</li>` +
-    `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.</li></ul>` +
+    `<ul><li><b>Длина уровней:</b> ровные — все по 20 мин; с ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12; турбо — все уровни по 5 мин.</li>` +
+    `<li><b>Анте</b> (для быстрой игры): равно большому блайнду, платит его игрок на BB. Появляется со 2-го уровня — первый уровень повторяется с теми же блайндами, но уже с анте.</li>` +
+    `<li><b>Re-entry</b>: можно выключить совсем — тогда выбывший игрок за стол не возвращается.</li></ul>` +
     (last >= 0 ? `<p>💰 <b>Re-entry</b> открыт до конца уровня ${blindsLabel(levels[last])} включительно.</p>` : '')
   );
 }
@@ -1017,7 +1026,7 @@ function rebuyCellLabel(label, maxStacks) {
 // расписание "2 стека"/"1 стек" под то, сколько физически осталось в наборе именно на нём
 // (а не одно число, посчитанное для текущего уровня игры и применённое ко всем строкам сразу)
 // currentLevel (если передан) отмечает зелёным кружком текущий уровень блайндов в игре
-function blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, currentLevel) {
+function blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, currentLevel, reentryOff = false) {
   const levelCell = i => `${i === currentLevel ? '🟢 ' : ''}${i + 1}`;
   // у старых игр (до игры по времени) длины уровня нет
   const hasMinutes = levels.every(lv => lv.minutes);
@@ -1039,7 +1048,7 @@ function blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxSta
   return (
     `<h3>📈 Уровни блайндов</h3>` +
     `<table><tr>${head}</tr>${rows}</table>` +
-    (rebuysAllowed ? '' : `<p>🚫 <i>Re-entry недоступны — в наборе не хватает фишек на ещё один стек.</i></p>`)
+    (rebuysAllowed ? '' : `<p>🚫 <i>${reentryOff ? REENTRY_OFF_TEXT : NO_CHIPS_FOR_REENTRY_TEXT}</i></p>`)
   );
 }
 
@@ -1115,7 +1124,7 @@ function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, b
     `<h2>📋 Правила турнира</h2>` +
     `<h3>🃏 Стартовый стек — ${valueLabel} (${stackResult.totalPieces} фишек)</h3>` +
     `<table><tr><th>Номинал</th><th>Кол-во</th><th>Сумма</th></tr>${stackRows}</table>` +
-    blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, state ? state.blindLevel || 0 : null);
+    blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, state ? state.blindLevel || 0 : null, reentryOffBySettings(state));
 
   if (state) {
     const unit = buyIn ? '₽' : 'фишек';
@@ -1127,7 +1136,7 @@ function gameRulesHtml({ state, stackResult, levels, rebuyRule, denomSchedule, b
       `<table><tr><th>Место</th><th>Приз</th></tr>${prizeTableRows(currentPrizes, unit)}</table>` +
       liveStandingsHtml(state, N, currentPrizes, unit) +
       moneyLineHtml(state) +
-      reserveLineHtml(maxRebuyStacksNow(state));
+      reserveLineHtml(maxRebuyStacksNow(state), reentryOffBySettings(state));
   } else {
     html += reserveLineHtml(staticReserveStacks);
   }
@@ -1157,7 +1166,7 @@ function gameStructureHtml({ state, N, stackResult, levels, rebuyRule, denomSche
     `<table><tr><th>Номинал</th><th>Кол-во</th><th>Сумма</th></tr>${stackRows}</table>` +
     shortfallLine;
 
-  const blindsTable = blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, state.blindLevel || 0);
+  const blindsTable = blindsTableHtml(levels, denomSchedule, rebuyRule, rebuysAllowed, maxStacksByLevel, state.blindLevel || 0, reentryOffBySettings(state));
 
   const bank = stackResult.totalValue * N;
   const prizeTable =
@@ -1341,23 +1350,27 @@ function canRebuyNow(state) {
 
 // один источник правды для расчёта структуры — использует и старт игры, и проверка
 // рекомендаций перед стартом (evaluateAndProceed), чтобы не считать по-разному в двух местах
-// settings — { ante, schedule } с экрана настроек турнира
+// settings — { ante, schedule, reentry } с экрана настроек турнира. Re-entry, выключенный в
+// настройках, закрыт на всех уровнях — дальше вся логика докупок видит его как закрытый по расписанию
 function computeStructureFor(denoms, buyIn, N, settings = {}) {
   const stackResult = buyIn ? computeTargetStack(denoms, N, buyIn) : computeStandardStack(denoms, N);
   const levels = computeBlindLevels(denoms, settings);
-  const rebuyRule = computeRebuySchedule(levels, denoms);
+  const reentryOff = settings.reentry === false;
+  const rebuyRule = reentryOff ? levels.map(() => REBUY_CLOSED) : computeRebuySchedule(levels, denoms);
   const denomSchedule = computeDenomSchedule(denoms, levels);
   const prizes = prizeBreakdown(stackResult.totalValue * N, N);
-  const rebuysAllowed = maxUsableStacksFromReserve(denoms, stackResult, N) > 0;
-  return { stackResult, levels, rebuyRule, denomSchedule, prizes, rebuysAllowed };
+  const chipsForRebuys = maxUsableStacksFromReserve(denoms, stackResult, N) > 0;
+  const rebuysAllowed = !reentryOff && chipsForRebuys;
+  return { stackResult, levels, rebuyRule, denomSchedule, prizes, rebuysAllowed, chipsForRebuys, reentryOff };
 }
 
 // эвристические проверки на удобство игры — не блокируют старт, только предупреждают
-function buildWarnings({ denoms, N, buyIn, stackResult, levels, prizes, rebuysAllowed }) {
+function buildWarnings({ denoms, N, buyIn, stackResult, levels, prizes, chipsForRebuys, reentryOff }) {
   const warnings = [];
   const unit = buyIn ? '₽' : 'фишек';
 
-  if (!rebuysAllowed) {
+  // если re-entry выключен в настройках, нехватка фишек на него не важна
+  if (!chipsForRebuys && !reentryOff) {
     warnings.push(
       `🚫 Фишек в наборе слишком мало для этого числа игроков — в банке не останется резерва даже на один дополнительный стек. Re-entry для этой игры будут отключены, и разменивать фишки во время игры будет физически нечем. Добавь фишек в набор или уменьши число игроков, если re-entry важны.`
     );
@@ -1522,6 +1535,7 @@ async function createGame(ctx, pending) {
       denoms,
       schedule: settings.schedule,
       ante: settings.ante,
+      reentry: settings.reentry,
       // сколько игроков реально получили стек при старте — отдельно от Object.keys(state.players),
       // которое может позже вырасти, если кто-то присоединится в процессе (см. poolAfterRebuysSoFar)
       originalN: N
@@ -1552,9 +1566,17 @@ function pluralDocupki() {
 // ---------- настройки турнира: длина уровней и анте ----------
 
 function tournamentSettings(pending) {
-  // по умолчанию — с ускорением и с анте (на экране настроек можно переключить)
-  return { schedule: pending.schedule || 'turbo', ante: pending.ante !== false };
+  // по умолчанию — с ускорением, с анте и с re-entry (на экране настроек можно переключить)
+  return { schedule: pending.schedule || 'turbo', ante: pending.ante !== false, reentry: pending.reentry !== false };
 }
+
+// re-entry выключен организатором на экране настроек (а не закрыт по времени / из-за нехватки фишек)
+function reentryOffBySettings(state) {
+  return Boolean(state && state.structure && state.structure.reentry === false);
+}
+
+const REENTRY_OFF_TEXT = 'Re-entry выключен в настройках этого турнира.';
+const NO_CHIPS_FOR_REENTRY_TEXT = 'Re-entry недоступны — в наборе не хватает фишек на ещё один стек.';
 
 // "2 ч 20 мин" / "40 мин"
 function fmtHoursMinutes(totalMinutes) {
@@ -1574,7 +1596,10 @@ function lastRebuyLevel(rebuyRule) {
 function settingsSummary(structure) {
   if (!structure || !structure.schedule) return '';
   const schedule = LEVEL_SCHEDULES[structure.schedule] || LEVEL_SCHEDULES.flat;
-  return `⏱ <b>Уровни:</b> ${schedule.label.toLowerCase()} · <b>Анте:</b> ${structure.ante ? 'вкл' : 'выкл'}`;
+  return (
+    `⏱ <b>Уровни:</b> ${schedule.label.toLowerCase()} · <b>Анте:</b> ${structure.ante ? 'вкл' : 'выкл'}` +
+    ` · <b>Re-entry:</b> ${structure.reentry === false ? 'выкл' : 'вкл'}`
+  );
 }
 
 function settingsPrompt(pending) {
@@ -1583,13 +1608,14 @@ function settingsPrompt(pending) {
   const rebuyRule = computeRebuySchedule(levels, pending.chipSet);
   const last = lastRebuyLevel(rebuyRule);
   const windowMinutes = levels.slice(0, last + 1).reduce((s, lv) => s + lv.minutes, 0);
-  const rebuyLine =
-    last >= 0
+  const rebuyLine = !settings.reentry
+    ? '🚫 Re-entry выключен: выбывший игрок за стол не возвращается.'
+    : last >= 0
       ? `💰 Re-entry открыт ${fmtHoursMinutes(windowMinutes)} — до конца уровня ${last + 1} (${blindsLabel(levels[last])}).`
       : '';
   const text =
     `⏱ ${b('Настройки турнира')}\n\n` +
-    `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12.\n\n` +
+    `${b('Уровни.')} Ровные — все по 20 мин. С ускорением — уровни 1–4 по 20 мин, 5–8 по 15, дальше по 12. Турбо — все уровни по 5 мин.\n\n` +
     `${b('Анте')} — для быстрой игры: равно большому блайнду, платит его игрок на BB. Со 2-го уровня: первый уровень повторяется с теми же блайндами, но уже с анте.\n\n` +
     rebuyLine;
   // выбранный вариант — зелёным (style: 'success', как в рейтинге) и галочкой, если клиент стиль не рисует
@@ -1602,9 +1628,11 @@ function settingsPrompt(pending) {
     keyboard: kb([
       [
         option(settings.schedule === 'flat', LEVEL_SCHEDULES.flat.label, 'ng:sched:flat'),
-        option(settings.schedule === 'turbo', LEVEL_SCHEDULES.turbo.label, 'ng:sched:turbo')
+        option(settings.schedule === 'turbo', LEVEL_SCHEDULES.turbo.label, 'ng:sched:turbo'),
+        option(settings.schedule === 'fast5', LEVEL_SCHEDULES.fast5.label, 'ng:sched:fast5')
       ],
       [option(!settings.ante, 'Без анте', 'ng:ante:0'), option(settings.ante, 'С анте', 'ng:ante:1')],
+      [option(!settings.reentry, 'Без re-entry', 'ng:reentry:0'), option(settings.reentry, 'С re-entry', 'ng:reentry:1')],
       [Markup.button.callback('▶️ Начать турнир', 'ng:start')],
       [Markup.button.callback('❌ Отмена', 'ng:cancel')]
     ])
@@ -1627,7 +1655,7 @@ bot.action('ng:done', async ctx => {
   await showSettingsPrompt(ctx, pending);
 });
 
-bot.action(/^ng:sched:(flat|turbo)$/, async ctx => {
+bot.action(/^ng:sched:(flat|turbo|fast5)$/, async ctx => {
   const pending = pendingNewGame.get(ctx.from.id);
   if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
   pending.schedule = ctx.match[1];
@@ -1639,6 +1667,14 @@ bot.action(/^ng:ante:(0|1)$/, async ctx => {
   const pending = pendingNewGame.get(ctx.from.id);
   if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
   pending.ante = ctx.match[1] === '1';
+  ctx.answerCbQuery();
+  await showSettingsPrompt(ctx, pending);
+});
+
+bot.action(/^ng:reentry:(0|1)$/, async ctx => {
+  const pending = pendingNewGame.get(ctx.from.id);
+  if (!pending || !pending.selected) return ctx.answerCbQuery('Сессия выбора истекла, запусти /newgame заново');
+  pending.reentry = ctx.match[1] === '1';
   ctx.answerCbQuery();
   await showSettingsPrompt(ctx, pending);
 });
@@ -1686,14 +1722,15 @@ function blindLevelLine(state) {
   const hasStructure = state.structure && state.structure.denoms;
   const stacks = hasStructure ? maxRebuyStacksNow(state) : null;
   const reserveLine =
-    stacks == null ? '' : stacks === 0 ? ' · <b>Re-entry недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
+    stacks == null ? '' : reentryOffBySettings(state) ? ' · <b>Без re-entry</b>' : stacks === 0 ? ' · <b>Re-entry недоступны</b>' : ` · <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}`;
   return `<p>🟢 <b>Блайнды:</b> ${blindsLabel(lv)} (уровень ${idx + 1}/${levels.length})${reserveLine}</p>`;
 }
 
 // отдельной строкой внизу — там, где нет полной строки блайндов (стартовое сообщение турнира,
 // экран правил): stacks === null — нет данных для расчёта (старая игра без сохранённого набора)
-function reserveLineHtml(stacks) {
+function reserveLineHtml(stacks, reentryOff = false) {
   if (stacks == null) return '';
+  if (reentryOff) return `<p>🚫 <b>Re-entry выключен</b> в настройках этого турнира.</p>`;
   return stacks === 0
     ? `<p>🚫 <b>Re-entry недоступны</b> — в наборе не хватает фишек на ещё один стек.</p>`
     : `<p>💰 <b>Резерв:</b> ${stacks} ${pluralDocupki(stacks)}</p>`;
@@ -2139,7 +2176,11 @@ bot.hears(BTN_REBUY, ctx => {
   if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
   if (!canRebuyNow(state)) {
     const closedBySchedule = state.structure && state.structure.rebuyRule && state.structure.rebuyRule[state.blindLevel || 0] === REBUY_CLOSED;
-    const reason = closedBySchedule ? 'Re-entry закрыт — время на него вышло.' : 'Re-entry недоступны — в наборе не хватает фишек на ещё один стек.';
+    const reason = reentryOffBySettings(state)
+      ? REENTRY_OFF_TEXT
+      : closedBySchedule
+        ? 'Re-entry закрыт — время на него вышло.'
+        : NO_CHIPS_FOR_REENTRY_TEXT;
     return showPanel(ctx, `🚫 ${reason}`, replyKb(gameRows(state)));
   }
   const maxRebuys = maxRebuysConfigured(state);
@@ -2309,6 +2350,110 @@ bot.action(/^addplayer:(\d+)$/, ctx => {
 
   const msg = `<p>🆕 <b>${esc(player.display_name)}</b> присоединяется к турниру!</p>` + statusHtml(state);
   showRichPanel(ctx, msg, gameRows(state));
+});
+
+// --- передача хоста: организатор уезжает — отдаёт управление столом другому игроку этого турнира ---
+
+// кому можно передать: любой игрок этого стола (и ещё играющий, и выбывший), кроме самого хоста
+// и тех, у кого уже есть свой стол (у человека максимум один стол)
+function hostCandidates(ownerId, state) {
+  return Object.keys(state.players).filter(id => String(id) !== String(ownerId) && !getState(Number(id)));
+}
+
+function hostCandidatesKeyboard(ownerId, state) {
+  return [
+    ...hostCandidates(ownerId, state).map(id => [
+      Markup.button.callback(`${state.players[id]}${state.busted.includes(id) ? ' (выбыл)' : ''}`, `host:pick:${id}`)
+    ]),
+    [BACK_TO_STATUS]
+  ];
+}
+
+const HOST_PROMPT =
+  `👑 ${b('Передать хост')}\nКому передать управление столом? Он получит все кнопки турнира ` +
+  `(уровни, knockout, re-entry, завершение), а у тебя останется только просмотр.`;
+
+bot.hears(BTN_TRANSFER_HOST, ctx => {
+  const ownerId = gameOwnerId(ctx);
+  const state = getState(ownerId);
+  if (!state) return showPanel(ctx, 'Нет активной игры.', replyKb(menuRows(ctx)));
+  if (!hostCandidates(ownerId, state).length) {
+    return showPanel(ctx, 'Передать хост некому — за столом нет других игроков без своего стола.', replyKb(gameRows(state)));
+  }
+  showPanel(ctx, HOST_PROMPT, kb(hostCandidatesKeyboard(ownerId, state)));
+});
+
+bot.action(/^host:pick:(\d+)$/, ctx => {
+  const ownerId = gameOwnerId(ctx);
+  const state = getState(ownerId);
+  if (!state) return ctx.answerCbQuery('Нет активной игры');
+  const toId = ctx.match[1];
+  if (!hostCandidates(ownerId, state).includes(toId)) return ctx.answerCbQuery('Этому игроку передать нельзя');
+  ctx.answerCbQuery();
+  ctx.editMessageText(
+    `👑 Передать управление турниром №${state.gameNo} игроку ${b(state.players[toId])}?\n` +
+      `Отменить это сможет только он сам — передав хост обратно.`,
+    kb([
+      [Markup.button.callback('✅ Да, передать', `host:ok:${toId}`), Markup.button.callback('⬅️ Назад', 'host:back')]
+    ])
+  );
+});
+
+bot.action('host:back', ctx => {
+  const ownerId = gameOwnerId(ctx);
+  const state = getState(ownerId);
+  if (!state) return ctx.answerCbQuery('Нет активной игры');
+  ctx.answerCbQuery();
+  ctx.editMessageText(HOST_PROMPT, kb(hostCandidatesKeyboard(ownerId, state)));
+});
+
+bot.action(/^host:ok:(\d+)$/, async ctx => {
+  const fromId = gameOwnerId(ctx);
+  const state = getState(fromId);
+  if (!state) return ctx.answerCbQuery('Нет активной игры');
+  const toId = Number(ctx.match[1]);
+  if (!hostCandidates(fromId, state).includes(String(toId))) return ctx.answerCbQuery('Этому игроку передать нельзя', { show_alert: true });
+
+  // закреп с таймером: у нового хоста он появится как у организатора, а прежний остаётся
+  // зрителем — его закреп продолжает обновляться
+  const prevChatId = String(state.adminChatId);
+  state.adminChatId = toId; // личный чат с ботом — это id пользователя
+  if (state.timer) {
+    state.timer.watchers = [...new Set([...(state.timer.watchers || []), prevChatId])].filter(id => id !== String(toId));
+  }
+  if (!moveState(fromId, toId, state)) return ctx.answerCbQuery('У этого игрока уже есть свой стол', { show_alert: true });
+  ctx.answerCbQuery('Хост передан');
+
+  // владелец лиги, который управлял этим столом через "Войти", остаётся в нём; сам передавший — выходит
+  for (const [adminId, ownerId] of actingOwner) {
+    if (ownerId === fromId) actingOwner.set(adminId, toId);
+  }
+  actingOwner.delete(ctx.from.id);
+  actingOwner.delete(toId); // новый хост управляет своим столом, а не тем, в который "входил"
+
+  const toName = state.players[toId];
+  const me = getPlayerByTelegramId(ctx.from.id);
+  const fromName = me ? me.display_name : displayNameOf(ctx.from);
+  refreshTimerMessage(toId, { force: true });
+
+  let delivered = true;
+  try {
+    await clearLiveMessagesIn(toId);
+    const html = `<p>👑 <b>${esc(fromName)}</b> передал тебе управление турниром №${state.gameNo}. Теперь кнопки стола — у тебя.</p>` + statusHtml(state);
+    trackLiveMessageIn(toId, await sendRich(toId, html, gameRows(state)));
+  } catch (err) {
+    delivered = false;
+    console.error(`Host transfer notice to ${toId} failed:`, err.message);
+  }
+  // владелец лиги передал чужой стол — прежнему организатору тоже сообщаем, его кнопки больше не работают
+  if (fromId !== ctx.from.id) {
+    await sendRich(fromId, `<p>👑 Владелец лиги передал управление вашим турниром игроку <b>${esc(toName)}</b>.</p>`, menuRowsFor(fromId)).catch(() => {});
+  }
+
+  const note = delivered
+    ? ''
+    : `\n\n⚠️ Не получилось написать ${b(toName)} — пусть откроет бота и зайдёт в «${BTN_ACTIVE_GAMES}».`;
+  showPanel(ctx, `✅ Хост передан: столом теперь управляет ${b(toName)}.${note}`, replyKb(menuRows(ctx)));
 });
 
 // --- end game ---

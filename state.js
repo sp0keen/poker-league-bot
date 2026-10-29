@@ -40,6 +40,18 @@ function clearState(ownerId, finalState = null) {
   if (finalState || prev) gameEvents.emit('clear', Number(ownerId), finalState || prev);
 }
 
+// передача стола другому организатору: одна запись файла, чтобы стол ни на миг не пропал
+// (иначе табло увидело бы 'clear' и показало турнир завершённым). false — у нового уже есть свой стол
+function moveState(fromOwnerId, toOwnerId, state) {
+  const games = loadGames();
+  if (games[toOwnerId]) return false;
+  delete games[fromOwnerId];
+  games[toOwnerId] = state;
+  saveGames(games);
+  gameEvents.emit('change', Number(toOwnerId), state);
+  return true;
+}
+
 // [{ ownerId: Number, state }] — для панели "Активные игры" у владельца
 function getActiveGames() {
   const games = loadGames();
@@ -87,6 +99,7 @@ module.exports = {
   getState,
   setState,
   clearState,
+  moveState,
   getActiveGames,
   hasActiveGames,
   addPendingApproval,
