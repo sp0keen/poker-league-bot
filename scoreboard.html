@@ -89,7 +89,7 @@
   .standings .cap{color:var(--text);font-size:17px;margin:0 4px 10px}
   table{width:100%;border-collapse:collapse;font-size:18px}
   th{font-size:14px;font-weight:500;color:var(--dim);text-align:left;padding:6px 8px;letter-spacing:.02em}
-  td{padding:0 8px;height:42px;border-top:1px solid var(--border-soft);color:var(--text-2);white-space:nowrap}
+  td{padding:0 8px;height:var(--standings-row-height,42px);border-top:1px solid var(--border-soft);color:var(--text-2);white-space:nowrap}
   td.r,th.r{text-align:right}
   td.c,th.c{text-align:center}
   td.name{color:var(--text);max-width:150px;overflow:hidden;text-overflow:ellipsis}
@@ -490,12 +490,12 @@ function renderStatic(g, d) {
   swap($('s-avg'), fmt(d.avg), { delay: 60 });
   swap($('s-total'), fmt(d.totalChips), { delay: 120 });
 
-  // больше 8 строк не влезает — 9-й и 10-й просто не показываем
+  // Показываем всех участников; при большом столе уменьшаем высоту строк под доступное место.
   const tbody = $('standings');
   const rowsBefore = positions(tbody);
   const rowSig = r => [r.points, r.place, r.rebuys, r.ko, r.live].join('|');
   const changed = new Set(d.rows.filter(r => prevRows.has(r.id) && prevRows.get(r.id) !== rowSig(r)).map(r => r.id));
-  tbody.innerHTML = d.rows.slice(0, 8).map((r, i) => {
+  tbody.innerHTML = d.rows.map((r, i) => {
     const cls = [i === 0 ? 'lead' : '', r.live || r.place === 1 ? '' : 'out'].join(' ');
     const pts = `${r.points > 0 ? '+' : ''}${r.points}`;
     const ptsCls = r.points > 0 ? 'pos' : r.points < 0 ? 'neg' : '';
@@ -503,6 +503,11 @@ function renderStatic(g, d) {
       `<td class="name">${esc(g.players[r.id])}</td><td class="r pts ${ptsCls}">${pts}</td>` +
       `<td class="r">${r.prize ? fmt(r.prize) : '—'}</td><td class="c">${r.rebuys}</td><td class="c">${r.ko}</td></tr>`;
   }).join('');
+  const standingsPanel = tbody.closest('.standings');
+  const standingsStyle = getComputedStyle(standingsPanel);
+  const availableRowsHeight = standingsPanel.clientHeight - parseFloat(standingsStyle.paddingTop) - parseFloat(standingsStyle.paddingBottom)
+    - standingsPanel.querySelector('.cap').offsetHeight - 10 - tbody.previousElementSibling.offsetHeight - 2;
+  standingsPanel.style.setProperty('--standings-row-height', `${Math.min(42, Math.floor(availableRowsHeight / Math.max(1, d.rows.length)))}px`);
   flip(tbody, rowsBefore, tr => tr.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 600, easing: EASE }));
   if (animate && !REDUCED) {
     for (const tr of tbody.children) {
