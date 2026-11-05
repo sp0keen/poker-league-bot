@@ -3426,6 +3426,13 @@ setInterval(() => {
     botUsername: BOT_USERNAME,
     botToken: BOT_TOKEN
   });
+  // Обновить уже существующие закрепы, чтобы старые URL-кнопки табло
+  // сразу заменились на Telegram Web App-кнопки после обновления бота.
+  for (const { ownerId } of getActiveGames()) {
+    doRefreshTimerMessage(ownerId, true).catch(err => {
+      console.error(`Initial timer refresh for ${ownerId} failed:`, err.message);
+    });
+  }
   sweepExpiredApprovals().catch(err => console.error('Initial approval sweep failed:', err.message));
   bot.launch(); // не await — промис резолвится только после остановки поллинга
 })();
