@@ -199,13 +199,27 @@
   .sound.idle{opacity:0;pointer-events:none}
   .sound.wait{color:var(--gold);border-color:rgba(255,197,77,.5)}
   .fullscreen{white-space:nowrap}
+  .chat-launch{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;
+         background:rgba(13,29,51,.9);border:1px solid var(--border);color:var(--text-2);font:500 13px 'Roboto',sans-serif;cursor:pointer}
+  .chat-launch:hover{color:var(--text);border-color:var(--accent)}
+  .chat-panel{position:fixed;right:14px;bottom:66px;z-index:21;width:min(360px,calc(100vw - 28px));padding:12px;border:1px solid var(--border);border-radius:14px;background:rgba(10,23,41,.97);box-shadow:0 10px 30px rgba(0,0,0,.4)}
+  .chat-panel[hidden]{display:none}
+  .chat-form{display:flex;gap:8px}
+  .chat-form input{min-width:0;flex:1;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--panel-2);color:var(--text);font:14px 'Roboto',sans-serif;outline:none}
+  .chat-form input:focus{border-color:var(--accent)}
+  .chat-form button{padding:0 14px;border:0;border-radius:10px;background:var(--accent);color:white;font:700 13px 'Roboto',sans-serif;cursor:pointer}
+  .chat-toast{position:fixed;right:14px;bottom:68px;z-index:19;width:min(390px,calc(100vw - 28px));padding:13px 16px;border:1px solid rgba(90,162,255,.55);border-radius:14px;background:rgba(13,29,51,.96);box-shadow:0 12px 34px rgba(0,0,0,.38);animation:chat-in .35s ease-out both,chat-out .45s ease-in 9.55s both}
+  .chat-toast b{display:block;margin-bottom:4px;color:var(--accent-2);font-size:13px}
+  .chat-toast span{display:block;color:var(--text);font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+  @keyframes chat-in{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
+  @keyframes chat-out{to{opacity:0;transform:translateY(18px)}}
   /* На мобильных браузерах вкладка не всегда имеет право сама повернуть экран.
      В этом случае поворачиваем содержимое табло, чтобы оно сразу выглядело горизонтальным. */
   @media (orientation:portrait) and (max-width:700px){
     body{width:100vh;height:100vw;position:absolute;left:100%;top:0;transform:rotate(90deg);transform-origin:top left}
     .board-controls{position:absolute}
   }
-  @media (max-width:700px){.fullscreen{display:none}}
+  @media (max-width:700px){.fullscreen{display:none}.chat-panel{position:absolute}.chat-toast{position:absolute}}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
@@ -213,9 +227,17 @@
 </head>
 <body>
 <div class="board-controls">
+  <button class="chat-launch" id="chat-launch" type="button" aria-label="Открыть чат зрителей">💬 Чат</button>
   <button class="fullscreen" id="fullscreen" type="button" aria-label="Развернуть табло на весь экран"></button>
   <button class="sound" id="sound" type="button"></button>
 </div>
+<div class="chat-panel" id="chat-panel" hidden>
+  <form class="chat-form" id="chat-form">
+    <input id="chat-input" type="text" maxlength="240" autocomplete="off" placeholder="Сообщение для зрителей">
+    <button type="submit">Отправить</button>
+  </form>
+</div>
+<div id="chat-toasts" aria-live="polite"></div>
 <div class="overlay" id="overlay" hidden><div class="logo" data-icon="spade"></div><div class="msg"></div></div>
 <div class="stage" id="stage">
 
@@ -883,12 +905,56 @@ function receive(data) {
   render(data);
 }
 
+/* ============ чат зрителей ============ */
+let chatName = '';
+try { chatName = localStorage.getItem('board-chat-name') || ''; } catch (e) {}
+
+function showChatMessage(message) {
+  const toast = document.createElement('div');
+  toast.className = 'chat-toast';
+  const name = document.createElement('b');
+  name.textContent = message.name || 'Зритель';
+  const text = document.createElement('span');
+  text.textContent = message.text;
+  toast.append(name, text);
+  $('chat-toasts').appendChild(toast);
+  if (canPlay()) {
+    tone(659.25, 0, 0.1, { type: 'sine', gain: 0.12 });
+    tone(783.99, 0.1, 0.18, { type: 'sine', gain: 0.12 });
+  }
+  setTimeout(() => toast.remove(), 10500);
+}
+
+$('chat-launch').addEventListener('click', () => {
+  const panel = $('chat-panel');
+  panel.hidden = !panel.hidden;
+  if (!panel.hidden) $('chat-input').focus();
+});
+$('chat-form').addEventListener('submit', async e => {
+  e.preventDefault();
+  const input = $('chat-input');
+  const text = input.value.trim();
+  if (!text || !LIVE_KEY) return;
+  if (!chatName) {
+    chatName = (prompt('Как вас подписать в чате?', 'Зритель') || 'Зритель').trim().slice(0, 32) || 'Зритель';
+    try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
+  }
+  try {
+    const res = await fetch(`/t/${LIVE_KEY}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: chatName, text })
+    });
+    if (res.ok) input.value = '';
+  } catch (err) {}
+});
+
 paintIcons();
 fit();
 if (LIVE_KEY) {
   // EventSource сам переподключается после обрыва; сервер при подключении сразу шлёт состояние
   const src = new EventSource(`/t/${LIVE_KEY}/stream`);
   src.addEventListener('state', e => receive(JSON.parse(e.data)));
+  src.addEventListener('chat', e => showChatMessage(JSON.parse(e.data)));
 } else {
   render(demoGame());
   // демо: → переключает уровень, чтобы посмотреть, как листается структура

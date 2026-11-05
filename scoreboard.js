@@ -10,6 +10,7 @@ const path = require('path');
 // GET /t/<key>         — сама страница
 // GET /t/<key>/state   — состояние одним JSON (для отладки и первой загрузки)
 // GET /t/<key>/stream  — SSE: событие "state" при каждом изменении стола
+// POST /t/<key>/chat   — сообщение зрителя, которое рассылается по SSE
 
 const PAGE_FILE = path.join(__dirname, 'scoreboard.html');
 const HEARTBEAT_MS = 25000; // комментарий в поток, чтобы прокси не рвал "молчащее" соединение
@@ -20,6 +21,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView 
   const clients = new Map(); // boardKey -> Set<res>
   const finished = new Map(); // boardKey -> { view, at } — столы, которые уже закрыты
   const pendingSend = new Map(); // boardKey -> timeout
+  const chatHistory = new Map(); // boardKey -> последние сообщения в памяти процесса
 
   function findActive(key) {
     for (const { ownerId, state } of getActiveGames()) {
@@ -44,6 +46,29 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView 
 
   function send(res, data) {
     res.write(`event: state\ndata: ${data}\n\n`);
+  }
+
+  function sendEvent(res, event, data) {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  function broadcastChat(key, message) {
+    const set = clients.get(key);
+    if (!set || !set.size) return;
+    for (const res of set) sendEvent(res, 'chat', message);
+  }
+
+  function readBody(req) {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.setEncoding('utf8');
+      req.on('data', chunk => {
+        body += chunk;
+        if (body.length > 5000) req.destroy(new Error('Request body too large'));
+      });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
   }
 
   function broadcast(key) {
@@ -87,13 +112,44 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView 
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
-    const m = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{6,64})(\/state|\/stream)?\/?$/);
+    const m = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{6,64})(\/state|\/stream|\/chat)?\/?$/);
     const baseHeaders = { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' };
-    if (req.method !== 'GET' || !m) {
+    if (!m || (req.method !== 'GET' && !(req.method === 'POST' && m[2] === '/chat'))) {
       res.writeHead(404, { ...baseHeaders, 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Not found');
     }
     const [, key, sub] = m;
+
+    if (sub === '/chat') {
+      if (!viewFor(key)) {
+        res.writeHead(404, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(JSON.stringify({ error: 'Board not found' }));
+      }
+      readBody(req).then(raw => {
+        let input;
+        try { input = JSON.parse(raw || '{}'); } catch (err) { input = null; }
+        const name = String(input && input.name || '').trim().slice(0, 32);
+        const text = String(input && input.text || '').trim().slice(0, 240);
+        if (!text) {
+          res.writeHead(400, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+          return res.end(JSON.stringify({ error: 'Message is empty' }));
+        }
+        const message = { name: name || 'Зритель', text, at: Date.now() };
+        const history = chatHistory.get(key) || [];
+        history.push(message);
+        while (history.length > 30) history.shift();
+        chatHistory.set(key, history);
+        broadcastChat(key, message);
+        res.writeHead(204, baseHeaders);
+        res.end();
+      }).catch(() => {
+        if (!res.headersSent) {
+          res.writeHead(400, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
+          res.end(JSON.stringify({ error: 'Invalid request' }));
+        }
+      });
+      return;
+    }
 
     if (!sub) {
       fs.readFile(PAGE_FILE, (err, html) => {
@@ -123,6 +179,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView 
     send(res, payload(key));
     if (!clients.has(key)) clients.set(key, new Set());
     clients.get(key).add(res);
+    for (const message of chatHistory.get(key) || []) sendEvent(res, 'chat', message);
     req.on('close', () => {
       const set = clients.get(key);
       if (!set) return;
