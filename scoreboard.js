@@ -167,7 +167,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
           }
         }
         const pairs = data && typeof data === 'object'
-          ? Object.entries(input && input.initData ? new URLSearchParams(input.initData) : data)
+          ? (input && input.initData ? [...new URLSearchParams(input.initData)] : Object.entries(data))
             .filter(([k]) => k !== 'hash')
             .sort(([a], [b]) => a.localeCompare(b))
             .map(([k, v]) => `${k}=${v}`).join('\\n')
