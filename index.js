@@ -1937,15 +1937,18 @@ function boardLaunchUrl(state) {
 // разработке) — тогда закреп живёт без кнопки, а не пропадает целиком
 let boardButtonRejected = false;
 
-function timerExtra(state) {
+function timerExtra(state, chatId) {
   const url = boardLaunchUrl(state);
   if (!url || boardButtonRejected) return {};
-  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
+  const direct = Number(chatId) > 0 && boardUrl(state);
+  return { reply_markup: { inline_keyboard: [[direct
+    ? { text: '📺 Табло', web_app: { url: boardUrl(state) } }
+    : { text: '📺 Табло', url }]] } };
 }
 
-async function withBoardButtonFallback(send, state) {
+async function withBoardButtonFallback(send, state, chatId) {
   try {
-    return await send(timerExtra(state));
+    return await send(timerExtra(state, chatId));
   } catch (err) {
     if (boardButtonRejected || !/url|button/i.test(err.message) || !boardUrl(state)) throw err;
     boardButtonRejected = true;
@@ -2007,7 +2010,7 @@ async function refreshTimerIn(chatId, messageId, text, state, force = false) {
   const remember = id => timerShown.set(String(chatId), { messageId: id, text, key, at: Date.now() });
   if (messageId) {
     try {
-      await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state);
+      await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state, chatId);
       remember(messageId);
       return messageId;
     } catch (err) {
@@ -2021,7 +2024,7 @@ async function refreshTimerIn(chatId, messageId, text, state, force = false) {
   }
   const sent = await withBoardButtonFallback(
     extra => bot.telegram.sendMessage(chatId, text, { disable_notification: true, ...extra }),
-    state
+    state, chatId
   );
   remember(sent.message_id);
   await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(err => {
