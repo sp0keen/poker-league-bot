@@ -199,6 +199,12 @@
   .sound.idle{opacity:0;pointer-events:none}
   .sound.wait{color:var(--gold);border-color:rgba(255,197,77,.5)}
   .fullscreen{white-space:nowrap}
+  /* На мобильных браузерах вкладка не всегда имеет право сама повернуть экран.
+     В этом случае поворачиваем содержимое табло, чтобы оно сразу выглядело горизонтальным. */
+  @media (orientation:portrait) and (max-width:700px){
+    body{width:100vh;height:100vw;position:absolute;left:100%;top:0;transform:rotate(90deg);transform-origin:top left}
+    .board-controls{position:absolute}
+  }
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
@@ -830,7 +836,7 @@ updateSoundButton();
 /* полноэкранный режим табло */
 function updateFullscreenButton() {
   const btn = $('fullscreen');
-  const active = !!document.fullscreenElement;
+  const active = !!document.fullscreenElement || document.body.classList.contains('mobile-fullscreen-fallback');
   btn.textContent = active ? '⛶ Выйти из полноэкранного режима' : '⛶ На весь экран';
   btn.setAttribute('aria-label', active ? 'Выйти из полноэкранного режима' : 'Развернуть табло на весь экран');
 }
@@ -845,12 +851,16 @@ $('fullscreen').addEventListener('click', async e => {
   e.stopPropagation();
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else {
+    else if (document.documentElement.requestFullscreen) {
       await document.documentElement.requestFullscreen();
       lockLandscape();
+    } else {
+      document.body.classList.toggle('mobile-fullscreen-fallback');
     }
   } catch (err) {
-    console.warn('Fullscreen is unavailable:', err.message);
+    // На iOS и в некоторых встроенных браузерах Fullscreen API отсутствует
+    // или запрещён — CSS-поворот всё равно оставляет табло горизонтальным.
+    document.body.classList.toggle('mobile-fullscreen-fallback');
   }
   updateFullscreenButton();
 });
@@ -860,7 +870,9 @@ lockLandscape();
 
 /* масштаб холста под окно */
 function fit() {
-  const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+  const landscapeWidth = Math.max(innerWidth, innerHeight);
+  const landscapeHeight = Math.min(innerWidth, innerHeight);
+  const s = Math.min(landscapeWidth / 1920, landscapeHeight / 1080);
   $('stage').style.transform = `scale(${s}) translate(-50%,-50%)`;
 }
 addEventListener('resize', fit);
