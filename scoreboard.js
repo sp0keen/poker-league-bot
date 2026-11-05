@@ -185,7 +185,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
           return res.end('Scoreboard page missing');
         }
         res.writeHead(200, { ...baseHeaders, 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(html.toString().replaceAll('__TELEGRAM_BOT_USERNAME__', botUsername || ''));
+        res.end(html.toString().replaceAll('__TELEGRAM_BOT_USERNAME__', botUsername || 'strcpokerbot'));
       });
       return;
     }
