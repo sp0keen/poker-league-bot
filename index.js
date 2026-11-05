@@ -570,6 +570,14 @@ function replyKb(rows) {
 bot.start(async ctx => {
   const isNew = registerPlayer(ctx.from.id, ctx.from.username || null, displayNameOf(ctx.from));
 
+  const boardMatch = ctx.startPayload && ctx.startPayload.match(/^board_([A-Za-z0-9_-]{6,64})$/);
+  if (boardMatch && SCOREBOARD_URL) {
+    const url = `${SCOREBOARD_URL}/t/${boardMatch[1]}`;
+    return ctx.reply('📺 Откройте табло кнопкой ниже:', {
+      reply_markup: { inline_keyboard: [[{ text: '📺 Открыть табло', web_app: { url } }]] }
+    });
+  }
+
   // диплинк вида t.me/бот?start=player_<id> — переход с кликабельного имени в таблице
   const playerMatch = ctx.startPayload && ctx.startPayload.match(/^player_(\d+)$/);
   if (playerMatch) {
@@ -1919,12 +1927,18 @@ function boardUrl(state) {
   return SCOREBOARD_URL && state.boardKey ? `${SCOREBOARD_URL}/t/${state.boardKey}` : null;
 }
 
+function boardLaunchUrl(state) {
+  return BOT_USERNAME && state.boardKey
+    ? `https://t.me/${BOT_USERNAME}?start=board_${state.boardKey}`
+    : boardUrl(state);
+}
+
 // кнопка под закрепом с таймером; Telegram может не принять адрес (например, localhost при
 // разработке) — тогда закреп живёт без кнопки, а не пропадает целиком
 let boardButtonRejected = false;
 
 function timerExtra(state) {
-  const url = boardUrl(state);
+  const url = boardLaunchUrl(state);
   if (!url || boardButtonRejected) return {};
   return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', web_app: { url } }]] } };
 }
