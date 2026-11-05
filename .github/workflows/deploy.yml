@@ -21,7 +21,9 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # Не блокируем деплой на предварительном keyscan: SSH ниже использует
+          # StrictHostKeyChecking=no и покажет реальную причину, если VPS недоступен.
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
 
       - name: Синхронизировать код на сервер
         env:
