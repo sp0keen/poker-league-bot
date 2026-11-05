@@ -948,7 +948,7 @@ tgScript.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
 tgScript.dataset.size = 'large';
 tgScript.dataset.userpic = 'false';
 tgScript.dataset.onauth = 'onTelegramAuth(user)';
-document.head.appendChild(tgScript);
+if (!chatName && LIVE_KEY) $('telegram-auth-gate').appendChild(tgScript);
 window.onTelegramAuth = user => acceptTelegramAuth(user, user.hash);
 updateAuthGate();
 if (!chatName && LIVE_KEY) {
