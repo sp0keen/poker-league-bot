@@ -190,20 +190,25 @@
   .overlay{position:fixed;inset:0;z-index:10;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;color:var(--text-2);font-size:28px;text-align:center;padding:24px}
   .overlay[hidden]{display:none}
   .overlay .logo{width:72px;height:80px;color:var(--accent)}
-  /* кнопка звука — вне холста, в углу экрана; когда звук работает, прячется, пока не шевельнуть мышью */
-  .sound{position:fixed;right:14px;bottom:14px;z-index:20;display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;
+  /* управляющие кнопки — вне холста, в углу экрана */
+  .board-controls{position:fixed;right:14px;bottom:14px;z-index:20;display:flex;align-items:center;gap:8px}
+  .sound,.fullscreen{display:flex;align-items:center;gap:8px;padding:8px 14px;border-radius:999px;
          background:rgba(13,29,51,.9);border:1px solid var(--border);color:var(--text-2);font:500 13px 'Roboto',sans-serif;cursor:pointer;
          transition:opacity .4s}
-  .sound:hover{color:var(--text);border-color:var(--accent)}
+  .sound:hover,.fullscreen:hover{color:var(--text);border-color:var(--accent)}
   .sound.idle{opacity:0;pointer-events:none}
   .sound.wait{color:var(--gold);border-color:rgba(255,197,77,.5)}
+  .fullscreen{white-space:nowrap}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
 </style>
 </head>
 <body>
-<button class="sound" id="sound" type="button"></button>
+<div class="board-controls">
+  <button class="fullscreen" id="fullscreen" type="button" aria-label="Развернуть табло на весь экран"></button>
+  <button class="sound" id="sound" type="button"></button>
+</div>
 <div class="overlay" id="overlay" hidden><div class="logo" data-icon="spade"></div><div class="msg"></div></div>
 <div class="stage" id="stage">
 
@@ -821,6 +826,37 @@ addEventListener('pointerdown', e => {
 });
 addEventListener('mousemove', () => { if (canPlay()) updateSoundButton(); });
 updateSoundButton();
+
+/* полноэкранный режим табло */
+function updateFullscreenButton() {
+  const btn = $('fullscreen');
+  const active = !!document.fullscreenElement;
+  btn.textContent = active ? '⛶ Выйти из полноэкранного режима' : '⛶ На весь экран';
+  btn.setAttribute('aria-label', active ? 'Выйти из полноэкранного режима' : 'Развернуть табло на весь экран');
+}
+
+function lockLandscape() {
+  if (screen.orientation && screen.orientation.lock) {
+    screen.orientation.lock('landscape').catch(() => {});
+  }
+}
+
+$('fullscreen').addEventListener('click', async e => {
+  e.stopPropagation();
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else {
+      await document.documentElement.requestFullscreen();
+      lockLandscape();
+    }
+  } catch (err) {
+    console.warn('Fullscreen is unavailable:', err.message);
+  }
+  updateFullscreenButton();
+});
+document.addEventListener('fullscreenchange', updateFullscreenButton);
+updateFullscreenButton();
+lockLandscape();
 
 /* масштаб холста под окно */
 function fit() {
