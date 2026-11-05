@@ -927,9 +927,10 @@ function updateAuthGate() {
   $('auth-gate').hidden = !!chatName;
 }
 
-window.onTelegramAuth = async user => {
+async function acceptTelegramAuth(user, hash) {
   try {
-    const { hash, ...profile } = user;
+    const profile = { ...user };
+    delete profile.hash;
     const res = await fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user: profile, hash }) });
     if (!res.ok) return;
     const data = await res.json();
@@ -938,7 +939,16 @@ window.onTelegramAuth = async user => {
     updateAuthGate();
     location.reload();
   } catch (err) {}
-};
+}
+window.onTelegramAuth = user => acceptTelegramAuth(user, user.hash);
+const telegramParams = new URLSearchParams(location.search);
+if (telegramParams.has('hash') && telegramParams.has('id')) {
+  const telegramUser = Object.fromEntries(telegramParams.entries());
+  const telegramHash = telegramUser.hash;
+  delete telegramUser.hash;
+  acceptTelegramAuth(telegramUser, telegramHash);
+  history.replaceState(null, '', location.pathname);
+}
 updateAuthGate();
 if (!chatName && LIVE_KEY) {
   const script = document.createElement('script');
@@ -947,6 +957,7 @@ if (!chatName && LIVE_KEY) {
   script.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
   script.dataset.size = 'small';
   script.dataset.userpic = 'false';
+  script.dataset.authUrl = location.href.split('?')[0];
   script.dataset.onauth = 'onTelegramAuth(user)';
   $('telegram-auth-gate').appendChild(script);
 } else {
