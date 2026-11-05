@@ -570,14 +570,6 @@ function replyKb(rows) {
 bot.start(async ctx => {
   const isNew = registerPlayer(ctx.from.id, ctx.from.username || null, displayNameOf(ctx.from));
 
-  const boardMatch = ctx.startPayload && ctx.startPayload.match(/^board_([A-Za-z0-9_-]{6,64})$/);
-  if (boardMatch && SCOREBOARD_URL) {
-    const url = `${SCOREBOARD_URL}/t/${boardMatch[1]}`;
-    return ctx.reply('📺 Откройте табло кнопкой ниже:', {
-      reply_markup: { inline_keyboard: [[{ text: '📺 Открыть табло', web_app: { url } }]] }
-    });
-  }
-
   // диплинк вида t.me/бот?start=player_<id> — переход с кликабельного имени в таблице
   const playerMatch = ctx.startPayload && ctx.startPayload.match(/^player_(\d+)$/);
   if (playerMatch) {
@@ -1927,25 +1919,19 @@ function boardUrl(state) {
   return SCOREBOARD_URL && state.boardKey ? `${SCOREBOARD_URL}/t/${state.boardKey}` : null;
 }
 
-function boardLaunchUrl(state) {
-  return BOT_USERNAME && state.boardKey
-    ? `https://t.me/${BOT_USERNAME}?start=board_${state.boardKey}`
-    : boardUrl(state);
-}
-
 // кнопка под закрепом с таймером; Telegram может не принять адрес (например, localhost при
 // разработке) — тогда закреп живёт без кнопки, а не пропадает целиком
 let boardButtonRejected = false;
 
-function timerExtra(state, chatId) {
+function timerExtra(state) {
   const url = boardUrl(state);
   if (!url || boardButtonRejected) return {};
   return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
 }
 
-async function withBoardButtonFallback(send, state, chatId) {
+async function withBoardButtonFallback(send, state) {
   try {
-    return await send(timerExtra(state, chatId));
+    return await send(timerExtra(state));
   } catch (err) {
     if (boardButtonRejected || !/url|button/i.test(err.message) || !boardUrl(state)) throw err;
     boardButtonRejected = true;
@@ -2007,7 +1993,7 @@ async function refreshTimerIn(chatId, messageId, text, state, force = false) {
   const remember = id => timerShown.set(String(chatId), { messageId: id, text, key, at: Date.now() });
   if (messageId) {
     try {
-      await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state, chatId);
+      await withBoardButtonFallback(extra => bot.telegram.editMessageText(chatId, messageId, undefined, text, extra), state);
       remember(messageId);
       return messageId;
     } catch (err) {
@@ -2021,7 +2007,7 @@ async function refreshTimerIn(chatId, messageId, text, state, force = false) {
   }
   const sent = await withBoardButtonFallback(
     extra => bot.telegram.sendMessage(chatId, text, { disable_notification: true, ...extra }),
-    state, chatId
+    state
   );
   remember(sent.message_id);
   await bot.telegram.pinChatMessage(chatId, sent.message_id, { disable_notification: true }).catch(err => {
@@ -3436,17 +3422,8 @@ setInterval(() => {
     host: SCOREBOARD_HOST,
     gameEvents,
     getActiveGames,
-    toView: scoreboardView,
-    botUsername: BOT_USERNAME,
-    botToken: BOT_TOKEN
+    toView: scoreboardView
   });
-  // Обновить уже существующие закрепы, чтобы старые URL-кнопки табло
-  // сразу заменились на Telegram Web App-кнопки после обновления бота.
-  for (const { ownerId } of getActiveGames()) {
-    doRefreshTimerMessage(ownerId, true).catch(err => {
-      console.error(`Initial timer refresh for ${ownerId} failed:`, err.message);
-    });
-  }
   sweepExpiredApprovals().catch(err => console.error('Initial approval sweep failed:', err.message));
   bot.launch(); // не await — промис резолвится только после остановки поллинга
 })();

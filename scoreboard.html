@@ -218,17 +218,8 @@
   @media (orientation:portrait) and (max-width:700px){
     body{width:100vh;height:100vw;position:absolute;left:100%;top:0;transform:rotate(90deg);transform-origin:top left}
     .board-controls{position:absolute}
-    body.telegram-app{width:100%;height:100%;position:relative;left:auto;top:auto;transform:none;transform-origin:initial}
-    body.telegram-app .board-controls{position:fixed}
   }
   @media (max-width:700px){.fullscreen{display:none}.chat-panel{position:absolute}.chat-toast{position:absolute}}
-  .viewer-count{position:fixed;right:24px;top:18px;z-index:18;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:rgba(13,29,51,.88);color:var(--text-2);font:500 13px 'Roboto',sans-serif}
-  .viewer-count .eye{font-size:16px;line-height:1}
-  @media (max-width:700px){.viewer-count{position:absolute}}
-  .auth-gate{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:var(--bg);color:var(--text);text-align:center;padding:24px}
-  .auth-gate[hidden]{display:none}
-  .auth-gate .auth-title{font-size:24px;font-weight:700}
-  .auth-gate .auth-sub{max-width:360px;color:var(--text-2);font-size:15px;line-height:1.4}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
@@ -239,11 +230,6 @@
   <button class="chat-launch" id="chat-launch" type="button" aria-label="Открыть чат зрителей">💬 Чат</button>
   <button class="fullscreen" id="fullscreen" type="button" aria-label="Развернуть табло на весь экран"></button>
   <button class="sound" id="sound" type="button"></button>
-</div>
-<div class="viewer-count" aria-label="Количество зрителей"><span class="eye">👁</span><span id="viewer-count">0</span></div>
-<div class="auth-gate" id="auth-gate" hidden>
-  <div class="auth-title">Вход на табло</div>
-  <div class="auth-sub">Откройте табло через кнопку в Telegram — имя подставится автоматически.</div>
 </div>
 <div class="chat-panel" id="chat-panel" hidden>
   <form class="chat-form" id="chat-form">
@@ -907,56 +893,21 @@ lockLandscape();
 
 /* масштаб холста под окно */
 function fit() {
-  const mobilePortrait = matchMedia('(orientation:portrait) and (max-width:700px)').matches;
-  const availableWidth = mobilePortrait ? Math.max(innerWidth, innerHeight) : innerWidth;
-  const availableHeight = mobilePortrait ? Math.min(innerWidth, innerHeight) : innerHeight;
-  const s = Math.min(availableWidth / 1920, availableHeight / 1080);
+  const landscapeWidth = Math.max(innerWidth, innerHeight);
+  const landscapeHeight = Math.min(innerWidth, innerHeight);
+  const s = Math.min(landscapeWidth / 1920, landscapeHeight / 1080);
   $('stage').style.transform = `scale(${s}) translate(-50%,-50%)`;
 }
 addEventListener('resize', fit);
 
 function receive(data) {
   if (data.serverNow) clockOffset = data.serverNow - Date.now();
-  if (Number.isFinite(data.viewers)) $('viewer-count').textContent = data.viewers;
   render(data);
 }
 
 /* ============ чат зрителей ============ */
 let chatName = '';
 try { chatName = localStorage.getItem('board-chat-name') || ''; } catch (e) {}
-
-function updateAuthGate() {
-  $('auth-gate').hidden = !!chatName;
-}
-
-async function acceptTelegramAuth(user, hash) {
-  try {
-    const profile = { ...user };
-    delete profile.hash;
-    const res = await fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user: profile, hash }) });
-    if (!res.ok) return;
-    const data = await res.json();
-    chatName = data.name || 'Зритель';
-    try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
-    updateAuthGate();
-    location.reload();
-  } catch (err) {}
-}
-const tgScript = document.createElement('script');
-tgScript.src = 'https://telegram.org/js/telegram-widget.js?22';
-tgScript.async = true;
-tgScript.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
-tgScript.dataset.size = 'large';
-tgScript.dataset.userpic = 'false';
-tgScript.dataset.onauth = 'onTelegramAuth(user)';
-if (!chatName && LIVE_KEY) $('telegram-auth-gate').appendChild(tgScript);
-window.onTelegramAuth = user => acceptTelegramAuth(user, user.hash);
-updateAuthGate();
-if (!chatName && LIVE_KEY) {
-  if (!window.Telegram?.WebApp?.initData) $('auth-gate').hidden = false;
-} else {
-  updateAuthGate();
-}
 
 function showChatMessage(message) {
   const toast = document.createElement('div');
@@ -984,23 +935,24 @@ $('chat-form').addEventListener('submit', async e => {
   const input = $('chat-input');
   const text = input.value.trim();
   if (!text || !LIVE_KEY) return;
-  if (!chatName) return;
+  if (!chatName) {
+    chatName = (prompt('Как вас подписать в чате?', 'Зритель') || 'Зритель').trim().slice(0, 32) || 'Зритель';
+    try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
+  }
   try {
     const res = await fetch(`/t/${LIVE_KEY}/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: chatName, text })
     });
     if (res.ok) input.value = '';
-    else alert('Не удалось отправить сообщение. Попробуйте ещё раз.');
-  } catch (err) { alert('Нет связи с табло. Попробуйте ещё раз.'); }
+  } catch (err) {}
 });
 
 paintIcons();
 fit();
 if (LIVE_KEY) {
   // EventSource сам переподключается после обрыва; сервер при подключении сразу шлёт состояние
-  const srcViewer = encodeURIComponent(chatName || 'Зритель');
-  const src = new EventSource(`/t/${LIVE_KEY}/stream?viewer=${srcViewer}`);
+  const src = new EventSource(`/t/${LIVE_KEY}/stream`);
   src.addEventListener('state', e => receive(JSON.parse(e.data)));
   src.addEventListener('chat', e => showChatMessage(JSON.parse(e.data)));
 } else {

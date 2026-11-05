@@ -1,7 +1,6 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 
 // Веб-табло турнира: страница scoreboard.html + её данные. Живёт в том же процессе, что и бот, и
 // берёт состояние стола прямо из state.js — синхронизировать нечего. Страница открывается по
@@ -18,7 +17,7 @@ const HEARTBEAT_MS = 25000; // комментарий в поток, чтобы 
 const DEBOUNCE_MS = 150; // несколько setState подряд (действие + обновление закрепа) — одна рассылка
 const FINISHED_TTL_MS = 12 * 60 * 60 * 1000; // сколько показываем итог после конца турнира
 
-function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView, botUsername, botToken }) {
+function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView }) {
   const clients = new Map(); // boardKey -> Set<res>
   const finished = new Map(); // boardKey -> { view, at } — столы, которые уже закрыты
   const pendingSend = new Map(); // boardKey -> timeout
@@ -42,7 +41,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
 
   function payload(key) {
     const view = viewFor(key) || { status: 'missing' };
-    return JSON.stringify({ ...view, viewers: clients.get(key)?.size || 0, serverNow: Date.now() });
+    return JSON.stringify({ ...view, serverNow: Date.now() });
   }
 
   function send(res, data) {
@@ -113,9 +112,9 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://x');
-    const m = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{6,64})(\/state|\/stream|\/chat|\/auth)?\/?$/);
+    const m = url.pathname.match(/^\/t\/([A-Za-z0-9_-]{6,64})(\/state|\/stream|\/chat)?\/?$/);
     const baseHeaders = { 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' };
-    if (!m || (req.method !== 'GET' && !(req.method === 'POST' && (m[2] === '/chat' || m[2] === '/auth')))) {
+    if (!m || (req.method !== 'GET' && !(req.method === 'POST' && m[2] === '/chat'))) {
       res.writeHead(404, { ...baseHeaders, 'Content-Type': 'text/plain; charset=utf-8' });
       return res.end('Not found');
     }
@@ -152,48 +151,6 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
       return;
     }
 
-    if (sub === '/auth') {
-      readBody(req).then(raw => {
-        let input;
-        try { input = JSON.parse(raw || '{}'); } catch (err) { input = null; }
-        let data = input && input.user;
-        let hash = String(input && input.hash || '');
-        if (input && input.initData && botToken) {
-          const params = new URLSearchParams(input.initData);
-          hash = params.get('hash') || '';
-          data = Object.fromEntries(params.entries());
-          if (data.user) {
-            try { data.user = JSON.parse(data.user); } catch (err) { data.user = null; }
-          }
-        }
-        const pairs = data && typeof data === 'object'
-          ? (input && input.initData ? [...new URLSearchParams(input.initData)] : Object.entries(data))
-            .filter(([k]) => k !== 'hash')
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([k, v]) => `${k}=${v}`).join('\\n')
-          : '';
-        const secret = botToken
-          ? input && input.initData
-            ? crypto.createHmac('sha256', 'WebAppData').update(botToken).digest()
-            : crypto.createHash('sha256').update(botToken).digest()
-          : null;
-        const expected = secret ? crypto.createHmac('sha256', secret).update(pairs).digest('hex') : '';
-        const age = data && Number(data.auth_date) ? Date.now() / 1000 - Number(data.auth_date) : Infinity;
-        const validHash = hash.length === expected.length && hash && expected && crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(expected));
-        if (!validHash || age < -60 || age > 86400) {
-          res.writeHead(401, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
-          return res.end(JSON.stringify({ error: 'Telegram authorization failed' }));
-        }
-        res.writeHead(200, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
-        const user = input && input.initData ? data.user : data;
-        res.end(JSON.stringify({ name: [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username || 'Зритель' }));
-      }).catch(() => {
-        res.writeHead(400, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ error: 'Invalid authorization request' }));
-      });
-      return;
-    }
-
     if (!sub) {
       fs.readFile(PAGE_FILE, (err, html) => {
         if (err) {
@@ -201,7 +158,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
           return res.end('Scoreboard page missing');
         }
         res.writeHead(200, { ...baseHeaders, 'Content-Type': 'text/html; charset=utf-8' });
-        res.end(html.toString().replaceAll('__TELEGRAM_BOT_USERNAME__', botUsername || 'strcpokerbot'));
+        res.end(html);
       });
       return;
     }
@@ -223,14 +180,10 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
     if (!clients.has(key)) clients.set(key, new Set());
     clients.get(key).add(res);
     for (const message of chatHistory.get(key) || []) sendEvent(res, 'chat', message);
-    const viewerName = (url.searchParams.get('viewer') || 'Зритель').trim().slice(0, 32) || 'Зритель';
-    broadcastChat(key, { name: viewerName, text: 'присоединился к трансляции', system: true, at: Date.now() });
-    broadcast(key);
     req.on('close', () => {
       const set = clients.get(key);
       if (!set) return;
       set.delete(res);
-      if (set.size) broadcast(key);
       if (!set.size) clients.delete(key);
     });
   });
