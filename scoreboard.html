@@ -211,6 +211,8 @@
   .chat-toast{position:fixed;right:14px;bottom:68px;z-index:19;width:min(390px,calc(100vw - 28px));padding:13px 16px;border:1px solid rgba(90,162,255,.55);border-radius:14px;background:rgba(13,29,51,.96);box-shadow:0 12px 34px rgba(0,0,0,.38);animation:chat-in .35s ease-out both,chat-out .45s ease-in 9.55s both}
   .chat-toast b{display:block;margin-bottom:4px;color:var(--accent-2);font-size:13px}
   .chat-toast span{display:block;color:var(--text);font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+  .viewer-count{position:fixed;right:24px;top:18px;z-index:18;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:rgba(13,29,51,.88);color:var(--text-2);font:500 13px 'Roboto',sans-serif}
+  @media (max-width:700px){.viewer-count{position:absolute}}
   .auth-gate{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:var(--bg);color:var(--text);text-align:center;padding:24px}
   .auth-gate[hidden]{display:none}.auth-gate h2{font-size:26px}.auth-gate p{color:var(--text-2);font-size:16px}
   @keyframes chat-in{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:translateY(0)}}
@@ -240,6 +242,7 @@
   </form>
 </div>
 <div id="chat-toasts" aria-live="polite"></div>
+<div class="viewer-count" aria-label="Количество зрителей"><span>👁</span><span id="viewer-count">0</span></div>
 <div class="auth-gate" id="auth-gate" hidden>
   <h2>Вход на табло</h2><p>Авторизуйтесь через Telegram один раз.</p>
   <div id="telegram-auth"></div>
@@ -909,6 +912,7 @@ addEventListener('resize', fit);
 
 function receive(data) {
   if (data.serverNow) clockOffset = data.serverNow - Date.now();
+  if (Number.isFinite(data.viewers)) $('viewer-count').textContent = data.viewers;
   render(data);
 }
 

@@ -42,7 +42,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
 
   function payload(key) {
     const view = viewFor(key) || { status: 'missing' };
-    return JSON.stringify({ ...view, serverNow: Date.now() });
+    return JSON.stringify({ ...view, viewers: clients.get(key)?.size || 0, serverNow: Date.now() });
   }
 
   function send(res, data) {
@@ -202,10 +202,12 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
     if (!clients.has(key)) clients.set(key, new Set());
     clients.get(key).add(res);
     for (const message of chatHistory.get(key) || []) sendEvent(res, 'chat', message);
+    broadcast(key);
     req.on('close', () => {
       const set = clients.get(key);
       if (!set) return;
       set.delete(res);
+      if (set.size) broadcast(key);
       if (!set.size) clients.delete(key);
     });
   });
