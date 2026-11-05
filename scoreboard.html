@@ -205,6 +205,7 @@
     body{width:100vh;height:100vw;position:absolute;left:100%;top:0;transform:rotate(90deg);transform-origin:top left}
     .board-controls{position:absolute}
   }
+  @media (max-width:700px){.fullscreen{display:none}}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
