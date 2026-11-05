@@ -156,12 +156,27 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
       readBody(req).then(raw => {
         let input;
         try { input = JSON.parse(raw || '{}'); } catch (err) { input = null; }
-        const data = input && input.user;
-        const hash = String(input && input.hash || '');
+        let data = input && input.user;
+        let hash = String(input && input.hash || '');
+        if (input && input.initData && botToken) {
+          const params = new URLSearchParams(input.initData);
+          hash = params.get('hash') || '';
+          data = Object.fromEntries(params.entries());
+          if (data.user) {
+            try { data.user = JSON.parse(data.user); } catch (err) { data.user = null; }
+          }
+        }
         const pairs = data && typeof data === 'object'
-          ? Object.entries(data).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('\\n')
+          ? Object.entries(input && input.initData ? new URLSearchParams(input.initData) : data)
+            .filter(([k]) => k !== 'hash')
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([k, v]) => `${k}=${v}`).join('\\n')
           : '';
-        const secret = botToken ? crypto.createHash('sha256').update(botToken).digest() : null;
+        const secret = botToken
+          ? input && input.initData
+            ? crypto.createHmac('sha256', 'WebAppData').update(botToken).digest()
+            : crypto.createHash('sha256').update(botToken).digest()
+          : null;
         const expected = secret ? crypto.createHmac('sha256', secret).update(pairs).digest('hex') : '';
         const age = data && Number(data.auth_date) ? Date.now() / 1000 - Number(data.auth_date) : Infinity;
         const validHash = hash.length === expected.length && hash && expected && crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(expected));
@@ -170,7 +185,8 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
           return res.end(JSON.stringify({ error: 'Telegram authorization failed' }));
         }
         res.writeHead(200, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
-        res.end(JSON.stringify({ name: [data.first_name, data.last_name].filter(Boolean).join(' ') || data.username || 'Зритель' }));
+        const user = input && input.initData ? data.user : data;
+        res.end(JSON.stringify({ name: [user?.first_name, user?.last_name].filter(Boolean).join(' ') || user?.username || 'Зритель' }));
       }).catch(() => {
         res.writeHead(400, { ...baseHeaders, 'Content-Type': 'application/json; charset=utf-8' });
         res.end(JSON.stringify({ error: 'Invalid authorization request' }));

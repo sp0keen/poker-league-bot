@@ -241,8 +241,7 @@
 <div class="viewer-count" aria-label="Количество зрителей"><span class="eye">👁</span><span id="viewer-count">0</span></div>
 <div class="auth-gate" id="auth-gate" hidden>
   <div class="auth-title">Вход на табло</div>
-  <div class="auth-sub">Авторизуйтесь через Telegram один раз, чтобы писать в чат и отображаться по имени.</div>
-  <div id="telegram-auth-gate"></div>
+  <div class="auth-sub">Откройте табло через кнопку в Telegram — имя подставится автоматически.</div>
 </div>
 <div class="chat-panel" id="chat-panel" hidden>
   <form class="chat-form" id="chat-form">
@@ -940,26 +939,26 @@ async function acceptTelegramAuth(user, hash) {
     location.reload();
   } catch (err) {}
 }
-window.onTelegramAuth = user => acceptTelegramAuth(user, user.hash);
-const telegramParams = new URLSearchParams(location.search);
-if (telegramParams.has('hash') && telegramParams.has('id')) {
-  const telegramUser = Object.fromEntries(telegramParams.entries());
-  const telegramHash = telegramUser.hash;
-  delete telegramUser.hash;
-  acceptTelegramAuth(telegramUser, telegramHash);
-  history.replaceState(null, '', location.pathname);
-}
+const tgScript = document.createElement('script');
+tgScript.src = 'https://telegram.org/js/telegram-web-app.js';
+tgScript.onload = () => {
+  if (window.Telegram?.WebApp?.initData) {
+    Telegram.WebApp.ready();
+    Telegram.WebApp.expand();
+    fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ initData: Telegram.WebApp.initData }) })
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (!data) return;
+        chatName = data.name || 'Зритель';
+        try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
+        location.reload();
+      }).catch(() => {});
+  }
+};
+document.head.appendChild(tgScript);
 updateAuthGate();
 if (!chatName && LIVE_KEY) {
-  const script = document.createElement('script');
-  script.src = 'https://telegram.org/js/telegram-widget.js?22';
-  script.async = true;
-  script.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
-  script.dataset.size = 'small';
-  script.dataset.userpic = 'false';
-  script.dataset.authUrl = location.href.split('?')[0];
-  script.dataset.onauth = 'onTelegramAuth(user)';
-  $('telegram-auth-gate').appendChild(script);
+  if (!window.Telegram?.WebApp?.initData) $('auth-gate').hidden = false;
 } else {
   updateAuthGate();
 }

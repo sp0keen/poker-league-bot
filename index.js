@@ -1926,7 +1926,7 @@ let boardButtonRejected = false;
 function timerExtra(state) {
   const url = boardUrl(state);
   if (!url || boardButtonRejected) return {};
-  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
+  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', web_app: { url } }]] } };
 }
 
 async function withBoardButtonFallback(send, state) {
@@ -3422,7 +3422,9 @@ setInterval(() => {
     host: SCOREBOARD_HOST,
     gameEvents,
     getActiveGames,
-    toView: scoreboardView
+    toView: scoreboardView,
+    botUsername: BOT_USERNAME,
+    botToken: BOT_TOKEN
   });
   sweepExpiredApprovals().catch(err => console.error('Initial approval sweep failed:', err.message));
   bot.launch(); // не await — промис резолвится только после остановки поллинга
