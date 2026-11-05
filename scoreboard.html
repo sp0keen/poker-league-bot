@@ -236,6 +236,7 @@
 </div>
 <div class="viewer-count" aria-label="Количество зрителей"><span class="eye">👁</span><span id="viewer-count">0</span></div>
 <div class="chat-panel" id="chat-panel" hidden>
+  <div id="telegram-auth" style="margin-bottom:8px;text-align:center"></div>
   <form class="chat-form" id="chat-form">
     <input id="chat-input" type="text" maxlength="240" autocomplete="off" placeholder="Сообщение для зрителей">
     <button type="submit">Отправить</button>
@@ -914,6 +915,31 @@ function receive(data) {
 let chatName = '';
 try { chatName = localStorage.getItem('board-chat-name') || ''; } catch (e) {}
 
+window.onTelegramAuth = async user => {
+  try {
+    const { hash, ...profile } = user;
+    const res = await fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ user: profile, hash }) });
+    if (!res.ok) return;
+    const data = await res.json();
+    chatName = data.name || 'Зритель';
+    try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
+    location.reload();
+  } catch (err) {}
+};
+if (!chatName && LIVE_KEY) {
+  const script = document.createElement('script');
+  script.src = 'https://telegram.org/js/telegram-widget.js?22';
+  script.async = true;
+  script.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
+  script.dataset.size = 'small';
+  script.dataset.userpic = 'false';
+  script.dataset.onauth = 'onTelegramAuth(user)';
+  $('telegram-auth').appendChild(script);
+  $('chat-form').hidden = true;
+} else {
+  $('telegram-auth').hidden = true;
+}
+
 function showChatMessage(message) {
   const toast = document.createElement('div');
   toast.className = 'chat-toast';
@@ -940,10 +966,7 @@ $('chat-form').addEventListener('submit', async e => {
   const input = $('chat-input');
   const text = input.value.trim();
   if (!text || !LIVE_KEY) return;
-  if (!chatName) {
-    chatName = (prompt('Как вас подписать в чате?', 'Зритель') || 'Зритель').trim().slice(0, 32) || 'Зритель';
-    try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
-  }
+  if (!chatName) return;
   try {
     const res = await fetch(`/t/${LIVE_KEY}/chat`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -957,7 +980,8 @@ paintIcons();
 fit();
 if (LIVE_KEY) {
   // EventSource сам переподключается после обрыва; сервер при подключении сразу шлёт состояние
-  const src = new EventSource(`/t/${LIVE_KEY}/stream`);
+  const srcViewer = encodeURIComponent(chatName || 'Зритель');
+  const src = new EventSource(`/t/${LIVE_KEY}/stream?viewer=${srcViewer}`);
   src.addEventListener('state', e => receive(JSON.parse(e.data)));
   src.addEventListener('chat', e => showChatMessage(JSON.parse(e.data)));
 } else {
