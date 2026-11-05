@@ -1940,7 +1940,7 @@ let boardButtonRejected = false;
 function timerExtra(state) {
   const url = boardLaunchUrl(state);
   if (!url || boardButtonRejected) return {};
-  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', web_app: { url } }]] } };
+  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
 }
 
 async function withBoardButtonFallback(send, state) {
