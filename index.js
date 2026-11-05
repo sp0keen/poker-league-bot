@@ -1938,12 +1938,9 @@ function boardLaunchUrl(state) {
 let boardButtonRejected = false;
 
 function timerExtra(state, chatId) {
-  const url = boardLaunchUrl(state);
+  const url = boardUrl(state);
   if (!url || boardButtonRejected) return {};
-  const direct = Number(chatId) > 0 && boardUrl(state);
-  return { reply_markup: { inline_keyboard: [[direct
-    ? { text: '📺 Табло', web_app: { url: boardUrl(state) } }
-    : { text: '📺 Табло', url }]] } };
+  return { reply_markup: { inline_keyboard: [[{ text: '📺 Табло', url }]] } };
 }
 
 async function withBoardButtonFallback(send, state, chatId) {

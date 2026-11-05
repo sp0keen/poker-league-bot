@@ -942,26 +942,14 @@ async function acceptTelegramAuth(user, hash) {
   } catch (err) {}
 }
 const tgScript = document.createElement('script');
-tgScript.src = 'https://telegram.org/js/telegram-web-app.js';
-tgScript.onload = () => {
-  if (window.Telegram?.WebApp?.initData) {
-    Telegram.WebApp.ready();
-    Telegram.WebApp.expand();
-    document.body.classList.add('telegram-app');
-    if (Telegram.WebApp.requestFullscreen) Telegram.WebApp.requestFullscreen();
-    if (Telegram.WebApp.lockOrientation) Telegram.WebApp.lockOrientation('landscape');
-    fit();
-    fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ initData: Telegram.WebApp.initData }) })
-      .then(res => res.ok ? res.json() : null)
-      .then(data => {
-        if (!data) return;
-        chatName = data.name || 'Зритель';
-        try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
-        location.reload();
-      }).catch(() => {});
-  }
-};
+tgScript.src = 'https://telegram.org/js/telegram-widget.js?22';
+tgScript.async = true;
+tgScript.dataset.telegramLogin = '__TELEGRAM_BOT_USERNAME__';
+tgScript.dataset.size = 'large';
+tgScript.dataset.userpic = 'false';
+tgScript.dataset.onauth = 'onTelegramAuth(user)';
 document.head.appendChild(tgScript);
+window.onTelegramAuth = user => acceptTelegramAuth(user, user.hash);
 updateAuthGate();
 if (!chatName && LIVE_KEY) {
   if (!window.Telegram?.WebApp?.initData) $('auth-gate').hidden = false;
