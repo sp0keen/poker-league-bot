@@ -899,9 +899,10 @@ lockLandscape();
 
 /* масштаб холста под окно */
 function fit() {
-  const landscapeWidth = Math.max(innerWidth, innerHeight);
-  const landscapeHeight = Math.min(innerWidth, innerHeight);
-  const s = Math.min(landscapeWidth / 1920, landscapeHeight / 1080);
+  const mobilePortrait = matchMedia('(orientation:portrait) and (max-width:700px)').matches;
+  const availableWidth = mobilePortrait ? Math.max(innerWidth, innerHeight) : innerWidth;
+  const availableHeight = mobilePortrait ? Math.min(innerWidth, innerHeight) : innerHeight;
+  const s = Math.min(availableWidth / 1920, availableHeight / 1080);
   $('stage').style.transform = `scale(${s}) translate(-50%,-50%)`;
 }
 addEventListener('resize', fit);

@@ -158,7 +158,7 @@ function startScoreboardServer({ port, host, gameEvents, getActiveGames, toView,
         try { input = JSON.parse(raw || '{}'); } catch (err) { input = null; }
         const user = input && input.user;
         const hash = String(input && input.hash || '');
-        const check = user && Object.entries(user).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('\\n');
+        const check = user && Object.entries(user).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join('\n');
         const secret = botToken ? crypto.createHash('sha256').update(botToken).digest() : null;
         const expected = secret && check ? crypto.createHmac('sha256', secret).update(check).digest('hex') : '';
         const age = user && Number(user.auth_date) ? Date.now() / 1000 - Number(user.auth_date) : Infinity;
