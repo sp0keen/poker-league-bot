@@ -220,6 +220,9 @@
     .board-controls{position:absolute}
   }
   @media (max-width:700px){.fullscreen{display:none}.chat-panel{position:absolute}.chat-toast{position:absolute}}
+  .viewer-count{position:fixed;right:24px;top:18px;z-index:18;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:rgba(13,29,51,.88);color:var(--text-2);font:500 13px 'Roboto',sans-serif}
+  .viewer-count .eye{font-size:16px;line-height:1}
+  @media (max-width:700px){.viewer-count{position:absolute}}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
@@ -231,6 +234,7 @@
   <button class="fullscreen" id="fullscreen" type="button" aria-label="Развернуть табло на весь экран"></button>
   <button class="sound" id="sound" type="button"></button>
 </div>
+<div class="viewer-count" aria-label="Количество зрителей"><span class="eye">👁</span><span id="viewer-count">0</span></div>
 <div class="chat-panel" id="chat-panel" hidden>
   <form class="chat-form" id="chat-form">
     <input id="chat-input" type="text" maxlength="240" autocomplete="off" placeholder="Сообщение для зрителей">
@@ -902,6 +906,7 @@ addEventListener('resize', fit);
 
 function receive(data) {
   if (data.serverNow) clockOffset = data.serverNow - Date.now();
+  if (Number.isFinite(data.viewers)) $('viewer-count').textContent = data.viewers;
   render(data);
 }
 
