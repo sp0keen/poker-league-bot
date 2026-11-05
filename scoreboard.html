@@ -223,6 +223,10 @@
   .viewer-count{position:fixed;right:24px;top:18px;z-index:18;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:rgba(13,29,51,.88);color:var(--text-2);font:500 13px 'Roboto',sans-serif}
   .viewer-count .eye{font-size:16px;line-height:1}
   @media (max-width:700px){.viewer-count{position:absolute}}
+  .auth-gate{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:var(--bg);color:var(--text);text-align:center;padding:24px}
+  .auth-gate[hidden]{display:none}
+  .auth-gate .auth-title{font-size:24px;font-weight:700}
+  .auth-gate .auth-sub{max-width:360px;color:var(--text-2);font-size:15px;line-height:1.4}
   /* пауза: таймер до следующего уровня мигает */
   .next.paused #n-in{animation:blink 1.6s ease-in-out infinite}
   @keyframes blink{50%{opacity:.35}}
@@ -235,8 +239,12 @@
   <button class="sound" id="sound" type="button"></button>
 </div>
 <div class="viewer-count" aria-label="Количество зрителей"><span class="eye">👁</span><span id="viewer-count">0</span></div>
+<div class="auth-gate" id="auth-gate" hidden>
+  <div class="auth-title">Вход на табло</div>
+  <div class="auth-sub">Авторизуйтесь через Telegram один раз, чтобы писать в чат и отображаться по имени.</div>
+  <div id="telegram-auth-gate"></div>
+</div>
 <div class="chat-panel" id="chat-panel" hidden>
-  <div id="telegram-auth" style="margin-bottom:8px;text-align:center"></div>
   <form class="chat-form" id="chat-form">
     <input id="chat-input" type="text" maxlength="240" autocomplete="off" placeholder="Сообщение для зрителей">
     <button type="submit">Отправить</button>
@@ -915,6 +923,10 @@ function receive(data) {
 let chatName = '';
 try { chatName = localStorage.getItem('board-chat-name') || ''; } catch (e) {}
 
+function updateAuthGate() {
+  $('auth-gate').hidden = !!chatName;
+}
+
 window.onTelegramAuth = async user => {
   try {
     const { hash, ...profile } = user;
@@ -923,9 +935,11 @@ window.onTelegramAuth = async user => {
     const data = await res.json();
     chatName = data.name || 'Зритель';
     try { localStorage.setItem('board-chat-name', chatName); } catch (err) {}
+    updateAuthGate();
     location.reload();
   } catch (err) {}
 };
+updateAuthGate();
 if (!chatName && LIVE_KEY) {
   const script = document.createElement('script');
   script.src = 'https://telegram.org/js/telegram-widget.js?22';
@@ -934,10 +948,9 @@ if (!chatName && LIVE_KEY) {
   script.dataset.size = 'small';
   script.dataset.userpic = 'false';
   script.dataset.onauth = 'onTelegramAuth(user)';
-  $('telegram-auth').appendChild(script);
-  $('chat-form').hidden = true;
+  $('telegram-auth-gate').appendChild(script);
 } else {
-  $('telegram-auth').hidden = true;
+  updateAuthGate();
 }
 
 function showChatMessage(message) {
@@ -973,7 +986,8 @@ $('chat-form').addEventListener('submit', async e => {
       body: JSON.stringify({ name: chatName, text })
     });
     if (res.ok) input.value = '';
-  } catch (err) {}
+    else alert('Не удалось отправить сообщение. Попробуйте ещё раз.');
+  } catch (err) { alert('Нет связи с табло. Попробуйте ещё раз.'); }
 });
 
 paintIcons();
