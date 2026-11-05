@@ -218,6 +218,8 @@
   @media (orientation:portrait) and (max-width:700px){
     body{width:100vh;height:100vw;position:absolute;left:100%;top:0;transform:rotate(90deg);transform-origin:top left}
     .board-controls{position:absolute}
+    body.telegram-app{width:100%;height:100%;position:relative;left:auto;top:auto;transform:none;transform-origin:initial}
+    body.telegram-app .board-controls{position:fixed}
   }
   @media (max-width:700px){.fullscreen{display:none}.chat-panel{position:absolute}.chat-toast{position:absolute}}
   .viewer-count{position:fixed;right:24px;top:18px;z-index:18;display:flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:rgba(13,29,51,.88);color:var(--text-2);font:500 13px 'Roboto',sans-serif}
@@ -945,6 +947,10 @@ tgScript.onload = () => {
   if (window.Telegram?.WebApp?.initData) {
     Telegram.WebApp.ready();
     Telegram.WebApp.expand();
+    document.body.classList.add('telegram-app');
+    if (Telegram.WebApp.requestFullscreen) Telegram.WebApp.requestFullscreen();
+    if (Telegram.WebApp.lockOrientation) Telegram.WebApp.lockOrientation('landscape');
+    fit();
     fetch(`/t/${LIVE_KEY}/auth`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ initData: Telegram.WebApp.initData }) })
       .then(res => res.ok ? res.json() : null)
       .then(data => {
